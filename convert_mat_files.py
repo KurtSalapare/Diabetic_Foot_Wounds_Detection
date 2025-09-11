@@ -54,3 +54,5 @@ source_directory = 'Diabetic_Foot_Wounds_Detection/Data/Temp Data/pnt_mat_files'
 output_directory = 'Diabetic_Foot_Wounds_Detection/Data/Temp Data/json_format'
 
 convert_mat_to_json(source_directory, output_directory)
+
+## 288(num of []) x 381(per []) for pnt1 Direct_plantar_Left ##
