@@ -9,7 +9,7 @@ from scipy.io.matlab.miobase import MatReadWarning
 warnings.filterwarnings("ignore", category=MatReadWarning)
 
 # Load the .mat file
-mat = scipy.io.loadmat("Data/Temp Data/gz10.mat")
+mat = scipy.io.loadmat("Data/Temp Data/gz1.mat")
 
 # NOTE: swapped left/right as you mentioned
 left_crop  = mat["Direct_plantar_Right_crop"]
