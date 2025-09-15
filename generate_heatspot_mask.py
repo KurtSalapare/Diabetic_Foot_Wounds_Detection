@@ -17,26 +17,25 @@ output_dir = "output_images_with_wound"
 # Which day to use
 day_index = 0   # 0 = Day 1, 1 = Day 2, etc.
 
-# Which foot to apply wound on
-# Options: "left" or "right"
+# Which foot to apply wound on ("left" or "right")
 apply_to = "left"
 
-# Wound positioning mode
+# Wound positioning mode:
 # 1 = center of foot
 # 2 = random within foot
 # 3 = manual coordinate
 position_mode = 2
-manual_coord = (150, 180)  # (y, x) only used if position_mode == 3
+manual_coord = (150, 180)  # only used if position_mode == 3
 
 # Wound parameters
-core_radii   = (20, 20)    # ellipse radii for core (a, b)
-inflam_radii = (40, 40)    # ellipse radii for inflammation (a, b)
-core_temp    = 1.5         # core "heat" intensity
-inflam_temp  = 0.5         # inflammation "heat" intensity
+core_radii   = (15, 15)    # ellipse radii for core (a, b)
+inflam_radii = (30, 30)    # ellipse radii for inflammation (a, b)
+core_temp    = 3.0         # core "heat" intensity
+inflam_temp  = 1.5         # inflammation "heat" intensity
 
 # Gaussian blur for realism
-blur_sigma_core   = 3.0
-blur_sigma_inflam = 6.0
+blur_sigma_core   = 6.0
+blur_sigma_inflam = 5.0
 
 # ==========================
 # HELPER FUNCTIONS SECTION
@@ -62,6 +61,7 @@ if __name__ == "__main__":
     # NOTE: swapped assignment (your setup)
     left_crop  = mat["Direct_plantar_Right_crop"]
     right_crop = mat["Direct_plantar_Left_crop"]
+
 
     # Select chosen day
     scan_left  = left_crop[day_index, 0]

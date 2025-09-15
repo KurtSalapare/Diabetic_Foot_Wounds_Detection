@@ -1,0 +1,38 @@
+# venvs
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.dist-info/
+.build/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.ipynb_checkpoints
+.env
+*.sqlite3
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+/output_images/
+
+/thermal_images_converted_from_json/
