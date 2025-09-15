@@ -24,14 +24,14 @@ position_mode = 2
 manual_coord = (150, 180)  # only used if position_mode == 3
 
 # Wound parameters
-core_radii   = (10, 10)    # ellipse radii for core (a, b)
+core_radii   = (15, 15)    # ellipse radii for core (a, b)
 inflam_radii = (30, 30)    # ellipse radii for inflammation (a, b)
-core_temp    = 2.5         # core "heat" intensity
+core_temp    = 3.0         # core "heat" intensity
 inflam_temp  = 1.5         # inflammation "heat" intensity
 
 # Gaussian blur for realism
-blur_sigma_core   = 2.0
-blur_sigma_inflam = 4.0
+blur_sigma_core   = 6.0
+blur_sigma_inflam = 5.0
 
 # ==========================
 # MAIN CODE
@@ -57,10 +57,9 @@ os.makedirs(output_dir, exist_ok=True)
 num_days = left_crop.shape[0]
 
 # ==========================
-# Generate wound ONCE
+# Generate wound ONCE (locked across all days)
 # ==========================
 
-# Use Day 1 foot (target foot) to decide wound position
 scan_left  = left_crop[0, 0]
 scan_right = right_crop[0, 0]
 
@@ -70,8 +69,8 @@ img_right = np.where(scan_right == 0, np.nan, scan_right)
 target_img = img_left if apply_to == "left" else img_right
 h, w = target_img.shape
 
+# --- pick wound center ---
 ys, xs = np.where(~np.isnan(target_img))  # valid foot pixels only
-
 if position_mode == 1:  # center of foot
     y_center = int(np.mean(ys))
     x_center = int(np.mean(xs))
@@ -83,28 +82,73 @@ elif position_mode == 3:  # manual
 else:
     raise ValueError("Invalid position_mode. Use 1, 2, or 3.")
 
-# Build wound mask (same for all days)
+# --- pick wound shape mode randomly ---
+shape_modes = ["circle", "multi"]
+shape_mode = np.random.choice(shape_modes)
+
+print(f"Generated wound at ({y_center},{x_center}) with shape {shape_mode}")
+
 Y, X = np.ogrid[:h, :w]
+mask_core_binary   = np.zeros((h, w), dtype=bool)
+mask_inflam_binary = np.zeros((h, w), dtype=bool)
 
-core_mask = ((X - x_center)**2 / core_radii[0]**2 +
-             (Y - y_center)**2 / core_radii[1]**2) <= 1
-inflam_mask = ((X - x_center)**2 / inflam_radii[0]**2 +
-               (Y - y_center)**2 / inflam_radii[1]**2) <= 1
+if shape_mode == "circle":
+    mask_core_binary = (X - x_center)**2 + (Y - y_center)**2 <= core_radii[0]**2
+    mask_inflam_binary = (X - x_center)**2 + (Y - y_center)**2 <= inflam_radii[0]**2
 
+elif shape_mode == "multi":
+    n_blobs = np.random.randint(2, 11)  # 2–10 blobs
+    print(f"Generated {n_blobs} blobs for multi shape")
+
+    # Store centers of placed blobs
+    blob_centers = [(x_center, y_center)]
+
+    # Place initial blob
+    mask_core_binary |= (X - x_center)**2 + (Y - y_center)**2 <= core_radii[0]**2
+    mask_inflam_binary |= (X - x_center)**2 + (Y - y_center)**2 <= inflam_radii[0]**2
+
+    for _ in range(n_blobs - 1):
+        # Pick an existing blob center to attach to
+        base_x, base_y = blob_centers[np.random.randint(len(blob_centers))]
+
+        # Pick random angle + distance (to ensure touching but not always full overlap)
+        angle = np.random.uniform(0, 2*np.pi)
+        dist = np.random.randint(int(core_radii[0]*0.8), int(core_radii[0]*1.5))
+
+        dx = int(np.cos(angle) * dist)
+        dy = int(np.sin(angle) * dist)
+
+        new_x = base_x + dx
+        new_y = base_y + dy
+        blob_centers.append((new_x, new_y))
+
+        # Randomize radii a bit for irregularity
+        r_core   = np.random.randint(core_radii[0]//2, core_radii[0])
+        r_inflam = np.random.randint(inflam_radii[0]//2, inflam_radii[0])
+
+        # Build new blob
+        blob_core = (X - new_x)**2 + (Y - new_y)**2 <= r_core**2
+        blob_inflam = (X - new_x)**2 + (Y - new_y)**2 <= r_inflam**2
+
+        # Merge with cluster
+        mask_core_binary   |= blob_core
+        mask_inflam_binary |= blob_inflam
+
+# --- convert binary masks to temperature masks ---
 mask_core   = np.zeros((h, w))
 mask_inflam = np.zeros((h, w))
 
-mask_core[core_mask]     = core_temp
-mask_inflam[inflam_mask] = inflam_temp
+mask_core[mask_core_binary]     = core_temp
+mask_inflam[mask_inflam_binary] = inflam_temp
 
-# Apply Gaussian blur
+# --- apply Gaussian blur ---
 mask_core   = gaussian_filter(mask_core, sigma=blur_sigma_core)
 mask_inflam = gaussian_filter(mask_inflam, sigma=blur_sigma_inflam)
 
-# Final locked wound mask
+# --- final mask ---
 mask = np.maximum(mask_inflam, mask_core)
 
-# Save wound mask once
+# Save once
 scipy.io.savemat(os.path.join(output_dir, "wound_mask_locked.mat"),
                  {"wound_mask": mask})
 
@@ -137,7 +181,7 @@ for i in range(num_days):
     fig, ax = plt.subplots(figsize=(8, 6))
     im = ax.imshow(combined, cmap="hot")
     ax.axis("off")
-    ax.set_title(f"Day {i+1}: Left + Right foot with wound on {apply_to}")
+    ax.set_title(f"Day {i+1}: wound on {apply_to}")
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.04)
     cbar.set_label("Temperature (°C)")
@@ -146,4 +190,4 @@ for i in range(num_days):
                 dpi=300, bbox_inches="tight")
     plt.close()
 
-print(f"Saved {num_days} PNGs in '{output_dir}', all with the SAME locked wound mask on {apply_to} foot")
+print(f"Saved {num_days} PNGs in '{output_dir}', all with the same wound mask on {apply_to} foot")
