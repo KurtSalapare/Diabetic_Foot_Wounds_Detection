@@ -10,6 +10,10 @@ day_index = 1
 pnt = "Patient 1"
 output_dir = "foot_images_folder"
 
+# Directories #
+## MAT-Files ##
+mat_folder_path ="./Data/Temp Data"
+
 # ===========================
 # Helper Functions
 # ===========================
@@ -136,11 +140,36 @@ def initial_horizontal_split(two_dim_array, width_array_index):
 
     return top_half, bottom_half
 
+def horizontal_split_by_percentage(two_dim_array, percentage):
+    
+    if isinstance(two_dim_array, list):
+        two_dim_array = np.array(two_dim_array)
+    
+    if not isinstance(two_dim_array, np.ndarray) or two_dim_array.ndim != 2:
+        raise ValueError("Input must be a 2D NumPy array or a list of lists.")
+    
+    last_index = len(two_dim_array) - 1
+    first_index = 0
+    
+    while np.any(~np.isnan(two_dim_array[first_index])) and first_index != last_index: 
+        first_index+=1
+    while np.any(np.isnan(two_dim_array[last_index])) and not(last_index < 0): 
+        last_index-=1
+
+    # Calculate the total height of the foot
+    foot_height = last_index - first_index + 1
+    
+    # Calculate the split row index
+    split_row_index = first_index + int(foot_height * percentage)
+    
+    # Use NumPy's slicing to create the top and bottom portions
+    top_portion = two_dim_array[:split_row_index, :]
+    bottom_portion = two_dim_array[split_row_index:, :]
+
+    return top_portion, bottom_portion
+
 # ---------------------------
 
-# Directories #
-## MAT-Files ##
-mat_folder_path = "./Data/Temp Data"
 if __name__ == "__main__":
 
     ## Testing With Healthy 1 ##
@@ -183,13 +212,22 @@ if __name__ == "__main__":
     top_left, bottom_left = initial_horizontal_split(left_side, index_of_widest_array)
     top_right, bottom_right = initial_horizontal_split(right_side, index_of_widest_array)
     
-    gap_horizontal_left = np.full((5, top_left.shape[1]), np.nan)
-    gap_horizontal_right = np.full((5, top_right.shape[1]), np.nan)
+    bottom_left_top, bottom_left_bottom = horizontal_split_by_percentage(bottom_left, 0.8)
+    bottom_right_top, bottom_right_bottom = horizontal_split_by_percentage(bottom_right, 0.8)
+    
+    gap_horizontal_left = np.full((2, top_left.shape[1]), np.nan)
+    gap_horizontal_right = np.full((2, top_right.shape[1]), np.nan)
+    
+    gap_horizontal_bottom_left = np.full((2, bottom_left.shape[1]), np.nan)
+    gap_horizontal_bottom_right = np.full((2, bottom_right.shape[1]), np.nan)
+    
+    bottom_left = np.vstack((bottom_left_top,gap_horizontal_bottom_left, bottom_left_bottom))
+    bottom_right = np.vstack((bottom_right_top, gap_horizontal_bottom_right, bottom_right_bottom))
     
     combined_left = np.vstack((top_left, gap_horizontal_left, bottom_left))
     combined_right = np.vstack((top_right, gap_horizontal_right, bottom_right))
     
-    gap_vertical = np.full((combined_right.shape[0], 5), np.nan)
+    gap_vertical = np.full((combined_right.shape[0], 2), np.nan)
     
     combined = np.hstack((combined_left, gap_vertical, combined_right))
 
