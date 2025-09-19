@@ -79,12 +79,12 @@ def convert_to_2d_list(n_dimensional_array):
 
 def find_width(two_dim_array):
     if not two_dim_array.any():
-        return None, -1, -1
+        return [], -1, -1
 
     max_count = 0
-    best_array = None
-    best_index = -1
-    midpoint_index = -1
+    widest_array = []
+    index_of_widest_array = -1
+    midpoint_index_of_widest_array = -1
 
     for index, arr in enumerate(two_dim_array):
         # Get the indices of all non-NaN values
@@ -94,16 +94,16 @@ def find_width(two_dim_array):
         # Check if this count is greater than the current maximum
         if current_count > max_count:
             max_count = current_count
-            best_array = arr
-            best_index = index
+            widest_array = arr
+            index_of_widest_array = index
             
             # Calculate the midpoint index of the non-NaN values
             if current_count > 0:
-                midpoint_index = non_nan_indices[current_count // 2]
+                midpoint_index_of_widest_array = non_nan_indices[current_count // 2]
             else:
-                midpoint_index = -1
+                midpoint_index_of_widest_array = -1
             
-    return best_array, best_index, midpoint_index
+    return widest_array, index_of_widest_array, midpoint_index_of_widest_array
 
 def initial_vertical_split(two_dim_array, mid_point_index):
     # Check if the input is a list and convert it to a NumPy array
@@ -153,9 +153,9 @@ def horizontal_split_by_percentage(two_dim_array, percentage):
     
     while np.any(~np.isnan(two_dim_array[first_index])) and first_index != last_index: 
         first_index+=1
-    while np.any(np.isnan(two_dim_array[last_index])) and not(last_index < 0): 
-        last_index-=1
-
+    while np.all(np.isnan(two_dim_array[last_index])) and not(last_index < 0): 
+        last_index-=1    
+    
     # Calculate the total height of the foot
     foot_height = last_index - first_index + 1
     
@@ -168,12 +168,51 @@ def horizontal_split_by_percentage(two_dim_array, percentage):
 
     return top_portion, bottom_portion
 
+def vertical_split_by_percentage(two_dim_array, percentage):
+    if isinstance(two_dim_array, list):
+        two_dim_array = np.array(two_dim_array)
+    
+    if not isinstance(two_dim_array, np.ndarray) or two_dim_array.ndim != 2:
+        raise ValueError("Input must be a 2D NumPy array or a list of lists.")
+    
+    widest_array, index_of_widest_array, midpoint_index_of_widest_array = find_width(two_dim_array)
+    
+    print(widest_array)
+    
+    # Create a boolean mask of where values are NOT NaN.
+    # '~' is the logical NOT operator.
+    non_nan_mask = ~np.isnan(widest_array)
+    
+    non_nan_indices = np.where(non_nan_mask)[0]
+
+    # Check if any non-NaN values were found and get the first index
+    if non_nan_indices.size > 0:
+        first_non_nan_index = non_nan_indices[0]
+        
+        # Sum the boolean mask. In NumPy, True is treated as 1 and False as 0.
+        # The sum of the mask gives the total count of non-NaN values.
+        length_of_non_nan_values = np.sum(non_nan_mask)
+        
+        split_index_by_percentage = first_non_nan_index + int(length_of_non_nan_values * percentage)
+        
+        left_half = two_dim_array[:, :split_index_by_percentage]
+        
+        # The right side is from the foot split index to the end of the original image
+        right_half = two_dim_array[:, split_index_by_percentage:]
+        
+        return left_half, right_half
+    else:
+        print("No non-NaN values found in the array.")
+        empty_array = np.array([], dtype=np.int64)
+        return empty_array, empty_array
+    
+
 # ---------------------------
 
 if __name__ == "__main__":
 
     ## Testing With Healthy 1 ##
-    mat_pnt_one = scipy.io.loadmat(mat_folder_path + "/gz4.mat")
+    mat_pnt_one = scipy.io.loadmat(mat_folder_path + "/gz10.mat")
 
     # Working on right foot for now #
     right_crop = mat_pnt_one["Indirect_plantar_Right_crop"]
@@ -183,60 +222,21 @@ if __name__ == "__main__":
     # TESTING WITH THE RIGHT FOOT RIGHT NOW
     two_dim_array = img_right
     
-    # print(img_right)
-    # print(len(img_right))
-    # print(len(img_right[0]))
+    top, bottom = horizontal_split_by_percentage(two_dim_array, 0.65)
+    heel, mid_foot = horizontal_split_by_percentage(top, 0.4)
+    gap_horizontal = np.full((2, top.shape[1]), np.nan)
     
-    # if ((two_dim_array[0] != "error").any()):
-    #     print(two_dim_array)
-    #     print(len(two_dim_array))
-    #     print(len(two_dim_array[0]))
-    #     print(two_dim_array[100])
-        
-    # ==========================
-    # Split image and then
-    # Combine them to one with
-    # A gap between them
-    # ==========================
+    heel_split = np.vstack((heel, gap_horizontal, mid_foot))
     
-    widest_array, index_of_widest_array, mid_point_index = find_width(two_dim_array)
-    
-    left_side, right_side = initial_vertical_split(two_dim_array, mid_point_index)
-    # print("Check if same : " + str(np.array_equal(left_side,right_side)))
-    # print(len(left_side))
-    # print(len(left_side[0]))
-    # print(len(right_side))
-    # print(len(right_side[0]))
-    # print(len(two_dim_array))
-    
-    top_left, bottom_left = initial_horizontal_split(left_side, index_of_widest_array)
-    top_right, bottom_right = initial_horizontal_split(right_side, index_of_widest_array)
-    
-    bottom_left_top, bottom_left_bottom = horizontal_split_by_percentage(bottom_left, 0.8)
-    bottom_right_top, bottom_right_bottom = horizontal_split_by_percentage(bottom_right, 0.8)
-    
-    gap_horizontal_left = np.full((2, top_left.shape[1]), np.nan)
-    gap_horizontal_right = np.full((2, top_right.shape[1]), np.nan)
-    
-    gap_horizontal_bottom_left = np.full((2, bottom_left.shape[1]), np.nan)
-    gap_horizontal_bottom_right = np.full((2, bottom_right.shape[1]), np.nan)
-    
-    bottom_left = np.vstack((bottom_left_top,gap_horizontal_bottom_left, bottom_left_bottom))
-    bottom_right = np.vstack((bottom_right_top, gap_horizontal_bottom_right, bottom_right_bottom))
-    
-    combined_left = np.vstack((top_left, gap_horizontal_left, bottom_left))
-    combined_right = np.vstack((top_right, gap_horizontal_right, bottom_right))
-    
-    gap_vertical = np.full((combined_right.shape[0], 2), np.nan)
-    
-    combined = np.hstack((combined_left, gap_vertical, combined_right))
+    # combined_left_right = np.hstack((left_side, gap_vertical, right_side))
+    combined_top_bottom = np.vstack((heel_split, gap_horizontal, bottom))
 
     # ==========================
     # Plot and save
     # ==========================
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(combined, cmap="hot", interpolation='nearest')
+    im = ax.imshow(combined_top_bottom, cmap="hot", interpolation='nearest')
     ax.axis("off")
     ax.set_title(f"Day {day_index+1}: Foot for {pnt} Left Side")
 
@@ -244,8 +244,6 @@ if __name__ == "__main__":
     cbar.set_label("Temperature (°C)")
 
     plt.show()
-    
-    
 
     # plt.savefig(os.path.join(output_dir, f"foot_day{day_index+1}_left_side"),
     #             dpi=300, bbox_inches="tight")
