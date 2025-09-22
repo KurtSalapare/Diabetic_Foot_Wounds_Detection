@@ -206,6 +206,16 @@ def vertical_split_by_percentage(two_dim_array, percentage):
         empty_array = np.array([], dtype=np.int64)
         return empty_array, empty_array
     
+def segment_foot(foot_arr):
+    
+    top, bottom = horizontal_split_by_percentage(foot_arr, 0.65)
+    heel, mid_foot = horizontal_split_by_percentage(top, 0.4)
+    gap_horizontal = np.full((2, top.shape[1]), np.nan)
+    
+    heel_split = np.vstack((heel, gap_horizontal, mid_foot))
+    
+    return heel_split, gap_horizontal, bottom
+    
 
 # ---------------------------
 
@@ -220,13 +230,8 @@ if __name__ == "__main__":
     img_right = np.where(scan_right == 0, np.nan, scan_right)
     
     # TESTING WITH THE RIGHT FOOT RIGHT NOW
-    two_dim_array = img_right
+    heel_split, gap_horizontal, bottom = segment_foot(img_right)
     
-    top, bottom = horizontal_split_by_percentage(two_dim_array, 0.65)
-    heel, mid_foot = horizontal_split_by_percentage(top, 0.4)
-    gap_horizontal = np.full((2, top.shape[1]), np.nan)
-    
-    heel_split = np.vstack((heel, gap_horizontal, mid_foot))
     
     # combined_left_right = np.hstack((left_side, gap_vertical, right_side))
     combined_top_bottom = np.vstack((heel_split, gap_horizontal, bottom))
