@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import warnings
-from scipy.io.matlab.miobase import MatReadWarning
+from scipy.io.matlab import MatReadWarning
 from scipy.ndimage import gaussian_filter
 from skimage.morphology import disk
 from skimage.transform import rescale
@@ -225,5 +225,8 @@ for mode in modes_to_run:
         plt.savefig(os.path.join(output_dir, f"foot_day{i+1}_{mode}.png"),
                     dpi=300, bbox_inches="tight")
         plt.close()
+        
+        scipy.io.savemat(os.path.join(output_dir, f"wound_mask+foot_day{i+1}_{mode}.mat"),
+                         {"left_foot": img_left_trim, "right_foot": img_right_trim})
 
 print(f"Saved images and masks for modes {modes_to_run} in '{output_dir}'")
