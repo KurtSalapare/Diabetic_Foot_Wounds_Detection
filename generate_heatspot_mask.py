@@ -8,6 +8,8 @@ from scipy.ndimage import gaussian_filter
 from skimage.morphology import disk
 from skimage.transform import rescale
 
+from foot_part_identifier import horizontal_split_by_percentage, vertical_split_by_percentage, segment_foot
+
 # ==========================
 # CONFIGURATION SECTION
 # ==========================
@@ -15,9 +17,10 @@ from skimage.transform import rescale
 mat_file = "Data/Temp Data/gz1.mat"
 output_dir = "output_images_wound_modes"
 
-apply_to = "left"                # "left" or "right"
+apply_to = "right"                # "left" or "right"
 generation_mode = "developing"          # "static", "developing", "both"
 develop_mode = "size+intensity"   # "size+intensity" or "intensity-only"
+apply_wound_to = "upper_foot"             # "heel" or "upper_foot"
 
 position_mode = 2                 # 1=center, 2=random, 3=manual
 manual_coord = (150, 180)
@@ -165,10 +168,20 @@ def select_center_and_shape(left_crop, right_crop):
     img_left  = np.where(scan_left == 0, np.nan, scan_left)
     img_right = np.where(scan_right == 0, np.nan, scan_right)
 
-    target_img = img_left if apply_to == "left" else img_right
-    h, w = target_img.shape
+    target_foot = img_left if apply_to == "left" else img_right
+    heel, mid_foot, upper_foot = segment_foot(target_foot)
+    h, w = target_foot.shape
+    
+    if (apply_wound_to == "heel"):
+        upper_and_mid_foot = np.vstack((mid_foot, upper_foot))
+        upper_and_mid_foot[~np.isnan(upper_and_mid_foot)] = np.nan
+        target_area_on_foot = np.vstack((heel, upper_and_mid_foot))
+    else:
+        heel_and_mid_foot = np.vstack((mid_foot, upper_foot))
+        heel_and_mid_foot[~np.isnan(heel_and_mid_foot)] = np.nan
+        target_area_on_foot = np.vstack((heel_and_mid_foot, upper_foot))
 
-    ys, xs = np.where(~np.isnan(target_img))
+    ys, xs = np.where(~np.isnan(target_area_on_foot))
     if position_mode == 1:
         y_center = int(np.mean(ys)); x_center = int(np.mean(xs))
     elif position_mode == 2:
