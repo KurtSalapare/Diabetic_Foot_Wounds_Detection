@@ -14,13 +14,13 @@ from foot_part_identifier import horizontal_split_by_percentage, vertical_split_
 # CONFIGURATION SECTION
 # ==========================
 
-mat_file = "Data/Temp Data/gz1.mat"
+mat_file = "Data/Temp Data/gz9.mat"
 output_dir = "output_images_wound_modes"
 
 apply_to = "right"                # "left" or "right"
 generation_mode = "developing"          # "static", "developing", "both"
 develop_mode = "size+intensity"   # "size+intensity" or "intensity-only"
-apply_wound_to = "upper_foot"             # "heel" or "upper_foot"
+apply_wound_to = "upper"             # "heel" or "upper_foot"
 
 position_mode = 2                 # 1=center, 2=random, 3=manual
 manual_coord = (150, 180)
@@ -197,41 +197,7 @@ def select_center_and_shape(left_crop, right_crop):
     print(f"Wound generated at ({y_center},{x_center}) with shape '{shape_mode}'")
     return y_center, x_center, shape_mode, h, w
 
-
-# --------------------------------------------
-# MAIN FUNCTION
-# --------------------------------------------
-
-if __name__ == "__main__":
-    
-    warnings.filterwarnings("ignore", category=MatReadWarning)
-
-    mat = scipy.io.loadmat(mat_file)
-    left_crop  = mat["Indirect_plantar_Right_crop"]
-    right_crop = mat["Indirect_plantar_Left_crop"]
-
-    os.makedirs(output_dir, exist_ok=True)
-    num_days = left_crop.shape[0]
-    
-    # --------------------------
-    # 1) Pick center and shape
-    # --------------------------
-    y_center, x_center, shape_mode, h, w = select_center_and_shape(left_crop, right_crop)
-
-    Y, X = np.ogrid[:h, :w]
-
-    # --------------------------
-    # 2) User Helper to 
-    # Build final mask 
-    # (locked shape)
-    # --------------------------
-    final_core_mask, final_inflam_mask = build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_radius_final, multi_min_blobs, multi_max_blobs)
-
-    # --------------------------
-    # 3) Loop through days
-    # --------------------------
-    modes_to_run = [generation_mode] if generation_mode in ["static","developing"] else ["static","developing"]
-
+def simulate_wound_gen(modes_to_run, num_days, left_crop, right_crop):
     for mode in modes_to_run:
         for i in range(num_days):
             progress = (i / (num_days - 1)) if (num_days > 1) else 1.0
@@ -275,3 +241,39 @@ if __name__ == "__main__":
             #                  {"left_foot": img_left_trim, "right_foot": img_right_trim})
 
     print(f"Saved images and masks for modes {modes_to_run} in '{output_dir}'")
+
+# --------------------------------------------
+# MAIN FUNCTION
+# --------------------------------------------
+
+if __name__ == "__main__":
+    
+    warnings.filterwarnings("ignore", category=MatReadWarning)
+
+    mat = scipy.io.loadmat(mat_file)
+    left_crop  = mat["Indirect_plantar_Right_crop"]
+    right_crop = mat["Indirect_plantar_Left_crop"]
+
+    os.makedirs(output_dir, exist_ok=True)
+    num_days = left_crop.shape[0]
+    
+    # --------------------------
+    # 1) Pick center and shape
+    # --------------------------
+    y_center, x_center, shape_mode, h, w = select_center_and_shape(left_crop, right_crop)
+
+    Y, X = np.ogrid[:h, :w]
+
+    # --------------------------
+    # 2) User Helper to 
+    # Build final mask 
+    # (locked shape)
+    # --------------------------
+    final_core_mask, final_inflam_mask = build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_radius_final, multi_min_blobs, multi_max_blobs)
+
+    # --------------------------
+    # 3) Loop through days
+    # --------------------------
+    modes_to_run = [generation_mode] if generation_mode in ["static","developing"] else ["developing","static"]
+    
+    simulate_wound_gen(modes_to_run, num_days, left_crop, right_crop)
