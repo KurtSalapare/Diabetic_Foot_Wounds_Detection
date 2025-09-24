@@ -17,6 +17,11 @@ mat_folder_path ="./Data/Temp Data"
 # ===========================
 # Helper Functions
 # ===========================
+
+def trim_empty_columns(img):
+    valid_cols = ~(np.all(np.isnan(img) | (img == 0), axis=0))
+    return img[:, valid_cols]
+
 def convert_to_2d_list(n_dimensional_array):
     
     # Check if the input is a NumPy array
@@ -48,34 +53,6 @@ def convert_to_2d_list(n_dimensional_array):
     converted_list = list(converted_list)
     
     return converted_list
-
-# def find_height(two_dim_array):
-#     if not two_dim_array.any():
-#         return None, -1, -1
-    
-#     max_count = 0
-#     best_array = None
-#     best_index = -1
-#     midpoint_index = -1
-    
-#     for index, arr in enumerate(two_dim_array):
-#         # Get the indices of all non-NaN values
-#         non_nan_indices = np.where(~np.isnan(arr))[0]
-#         current_count = len(non_nan_indices)
-        
-#         # Check if this count is greater than the current maximum
-#         if current_count > max_count:
-#             max_count = current_count
-#             best_array = arr
-#             best_index = index
-            
-#             # Calculate the midpoint index of the non-NaN values
-#             if current_count > 0:
-#                 midpoint_index = non_nan_indices[current_count // 2]
-#             else:
-#                 midpoint_index = -1
-            
-#     return best_array, best_index, midpoint_index
 
 def find_width(two_dim_array):
     if not two_dim_array.any():
@@ -210,12 +187,13 @@ def segment_foot(foot_arr):
     
     top, bottom = horizontal_split_by_percentage(foot_arr, 0.65)
     heel, mid_foot = horizontal_split_by_percentage(top, 0.4)
-    gap_horizontal = np.full((2, top.shape[1]), np.nan)
+    # gap_horizontal = np.full((2, top.shape[1]), np.nan)
     
-    heel_split = np.vstack((heel, gap_horizontal, mid_foot))
+    # heel_split = np.vstack((heel, gap_horizontal, mid_foot)) # add gap_horizontal in the middle to vizualize it
     
-    return heel_split, gap_horizontal, bottom
+    return heel, mid_foot, bottom
     
+    # return heel_split, gap_horizontal, bottom         # Used for visualizing
 
 # ---------------------------
 
@@ -229,19 +207,28 @@ if __name__ == "__main__":
     scan_right = right_crop[day_index, 0]
     img_right = np.where(scan_right == 0, np.nan, scan_right)
     
+    left_crop = mat_pnt_one["Indirect_plantar_Left_crop"]
+    scan_left = left_crop[day_index, 0]
+    img_left = trim_empty_columns(np.where(scan_left == 0, np.nan, scan_left))
+    
     # TESTING WITH THE RIGHT FOOT RIGHT NOW
-    heel_split, gap_horizontal, bottom = segment_foot(img_right)
+    heel_split, mid_foot, upper_foot = segment_foot(img_right)
     
     
     # combined_left_right = np.hstack((left_side, gap_vertical, right_side))
-    combined_top_bottom = np.vstack((heel_split, gap_horizontal, bottom))
+    # combined_top_bottom = np.vstack((heel_split, gap_horizontal, bottom))
+    # left_foot_padding = np.full((4, img_left.shape[1]), np.nan)
+    # padded_left_foot = np.vstack((left_foot_padding, img_left))
+    
+    # left_right_gap = np.full((combined_top_bottom.shape[0], 5), np.nan)
+    # combined_left_right_feet = np.hstack((combined_top_bottom, left_right_gap, padded_left_foot))
 
     # ==========================
     # Plot and save
     # ==========================
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(combined_top_bottom, cmap="hot", interpolation='nearest')
+    im = ax.imshow(upper_foot, cmap="hot", interpolation='nearest')
     ax.axis("off")
     ax.set_title(f"Day {day_index+1}: Foot for {pnt} Left Side")
 
