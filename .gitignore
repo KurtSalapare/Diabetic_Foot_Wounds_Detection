@@ -36,3 +36,5 @@ Thumbs.db
 /output_images/
 
 /thermal_images_converted_from_json/
+
+/output_overlay_system/

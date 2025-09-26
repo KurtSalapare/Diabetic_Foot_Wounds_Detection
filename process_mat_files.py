@@ -9,11 +9,11 @@ from scipy.io.matlab.miobase import MatReadWarning
 warnings.filterwarnings("ignore", category=MatReadWarning)
 
 # Load the .mat file
-mat = scipy.io.loadmat("Data/Temp Data/gz1.mat")
+mat = scipy.io.loadmat("Data/Temp Data/gz3.mat")
 
 # NOTE: swapped left/right as you mentioned
-left_crop  = mat["Direct_plantar_Right_crop"]
-right_crop = mat["Direct_plantar_Left_crop"]
+left_crop  = mat["Indirect_plantar_Right_crop"]
+right_crop = mat["Indirect_plantar_Left_crop"]
 
 # Create output folder
 output_dir = "output_images"
