@@ -39,6 +39,9 @@ ROTATION_ANGLE_STEP = 1  # Step size for angle testing (degrees) - 1° for finer
 ENABLE_FOCUSED_OVERLAY = False  # Set to False to skip the focused overlay visualization
 ENABLE_INTERACTIVE_PLOTS = False  # Set to False to disable plt.show() - REQUIRED for PyCharm/IDE compatibility!
 
+# Data saving settings
+SAVE_PROCESSED_MAT_FILES = True  # Set to True to save processed thermal data as MAT files
+
 MAT_FILE = AVAILABLE_MAT_FILES[SELECTED_FILE]
 OUTPUT_DIR = "output_overlay_system"  # Single output folder for all files
 CMAP = "hot"
@@ -732,6 +735,59 @@ def create_foot_overlay():
         plt.show()
     else:
         plt.close(fig3)  # Close the figure to free memory
+    
+    # Save processed thermal data as MAT files (optional)
+    if SAVE_PROCESSED_MAT_FILES:
+        # Create a subdirectory for processed MAT files
+        processed_mat_dir = os.path.join(OUTPUT_DIR, "processed_mat_files")
+        os.makedirs(processed_mat_dir, exist_ok=True)
+        
+        # Save individual processed thermal arrays
+        processed_data = {
+            'left_foot_original': img_left,
+            'right_foot_mirrored': img_right_mir,
+            'right_foot_scaled': img_right_scaled,
+            'left_canvas': left_canvas,
+            'right_canvas': right_canvas,
+            'processing_info': {
+                'rotation_angle': rotation_angle,
+                'scale_x': scale_x,
+                'scale_y': scale_y,
+                'overlap_score': overlap_score,
+                'original_file': SELECTED_FILE,
+                'processing_timestamp': f"{np.datetime64('now')}"
+            }
+        }
+        
+        # Save the processed data
+        processed_mat_path = os.path.join(processed_mat_dir, f"processed_{SELECTED_FILE}.mat")
+        scipy.io.savemat(processed_mat_path, processed_data)
+        print(f"Processed thermal data saved to: {processed_mat_path}")
+        
+        # Also save individual foot data for easy access
+        left_foot_path = os.path.join(processed_mat_dir, f"left_foot_{SELECTED_FILE}.mat")
+        right_foot_path = os.path.join(processed_mat_dir, f"right_foot_processed_{SELECTED_FILE}.mat")
+        
+        scipy.io.savemat(left_foot_path, {
+            'thermal_data': img_left,
+            'canvas_data': left_canvas,
+            'source_file': SELECTED_FILE,
+            'foot_type': 'left_original'
+        })
+        
+        scipy.io.savemat(right_foot_path, {
+            'thermal_data': img_right_scaled,
+            'canvas_data': right_canvas,
+            'source_file': SELECTED_FILE,
+            'foot_type': 'right_processed',
+            'rotation_angle': rotation_angle,
+            'scale_x': scale_x,
+            'scale_y': scale_y
+        })
+        
+        print(f"Individual foot data saved:")
+        print(f"  Left foot: {left_foot_path}")
+        print(f"  Right foot (processed): {right_foot_path}")
     
     print("\\n" + "="*60)
     print("OVERLAY SUMMARY")
