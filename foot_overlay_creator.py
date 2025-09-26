@@ -14,6 +14,7 @@ from scipy.ndimage import zoom, rotate
 AVAILABLE_MAT_FILES = {
     "gz1": "Data/Temp Data/gz1.mat",
     "gz2": "Data/Temp Data/gz2.mat",
+    "gz3": "Data/Temp Data/gz3.mat",
     "gz7": "Data/Temp Data/gz7.mat",
     "gz8": "Data/Temp Data/gz8.mat", 
     "gz9": "Data/Temp Data/gz9.mat",
@@ -24,7 +25,7 @@ AVAILABLE_MAT_FILES = {
 }
 
 # Select which file to use (change this key to switch files)
-SELECTED_FILE = "gz1"  # Change to "gz1", "pnt1", etc.
+SELECTED_FILE = "pnt2"  # Change to "gz1", "pnt1", etc.
 
 # For object arrays, you can manually specify which index to use (set to None for automatic selection)
 MANUAL_INDEX_SELECTION = None  # Set to 0, 1, 2, etc. to manually select from object array
@@ -33,6 +34,9 @@ MANUAL_INDEX_SELECTION = None  # Set to 0, 1, 2, etc. to manually select from ob
 ENABLE_ROTATION_OPTIMIZATION = True  # Set to False to skip rotation
 ROTATION_ANGLE_RANGE = (-30, 30)  # Range of angles to test (degrees)
 ROTATION_ANGLE_STEP = 1  # Step size for angle testing (degrees) - 1° for finer precision
+
+# Visualization settings
+ENABLE_FOCUSED_OVERLAY = False  # Set to False to skip the focused overlay visualization
 
 MAT_FILE = AVAILABLE_MAT_FILES[SELECTED_FILE]
 OUTPUT_DIR = "output_overlay_system"  # Single output folder for all files
@@ -43,16 +47,64 @@ RIGHT_ALPHA = 0.45  # Transparency for right foot overlay
 # FUNCTIONS
 # ==========================
 def scale_image_preserve_temps(img, scale_x, scale_y):
-    """Scale image while preserving temperature values"""
+    """Scale image while preserving temperature values using conservative interpolation"""
+    from scipy.ndimage import map_coordinates
+    
     valid_mask = ~np.isnan(img)
-    min_temp = np.nanmin(img)
-    fill_value = min_temp - 5.0 if not np.isnan(min_temp) else 20.0
+    if not np.any(valid_mask):
+        # If no valid data, return scaled NaN array
+        new_height = int(img.shape[0] * scale_y)
+        new_width = int(img.shape[1] * scale_x)
+        return np.full((new_height, new_width), np.nan)
     
-    img_filled = np.where(valid_mask, img, fill_value)
-    scaled_img = zoom(img_filled, (scale_y, scale_x), order=1, mode='nearest')
-    scaled_mask = zoom(valid_mask.astype(float), (scale_y, scale_x), order=1, mode='nearest')
+    # Get temperature statistics for validation
+    valid_temps = img[valid_mask]
+    original_min = np.min(valid_temps)
+    original_max = np.max(valid_temps)
+    original_mean = np.mean(valid_temps)
     
-    return np.where(scaled_mask > 0.5, scaled_img, np.nan)
+    print(f"Original temperature range: {original_min:.2f}°C to {original_max:.2f}°C (mean: {original_mean:.2f}°C)")
+    
+    # Create output array
+    new_height = int(img.shape[0] * scale_y)
+    new_width = int(img.shape[1] * scale_x)
+    
+    # Create coordinate arrays for the new scaled image
+    y_new, x_new = np.mgrid[0:new_height, 0:new_width]
+    
+    # Map new coordinates back to original image coordinates
+    y_orig = y_new / scale_y
+    x_orig = x_new / scale_x
+    
+    # Use nearest neighbor interpolation to avoid temperature averaging
+    # This preserves exact temperature values without artificial increases
+    scaled_img = map_coordinates(
+        img, 
+        [y_orig.ravel(), x_orig.ravel()], 
+        order=0,  # Nearest neighbor - no temperature averaging
+        mode='constant', 
+        cval=np.nan,
+        prefilter=False  # Important: disable prefiltering for exact value preservation
+    ).reshape(new_height, new_width)
+    
+    # Validate temperature preservation
+    scaled_valid_mask = ~np.isnan(scaled_img)
+    if np.any(scaled_valid_mask):
+        scaled_valid_temps = scaled_img[scaled_valid_mask]
+        scaled_min = np.min(scaled_valid_temps)
+        scaled_max = np.max(scaled_valid_temps)
+        scaled_mean = np.mean(scaled_valid_temps)
+        
+        print(f"Scaled temperature range: {scaled_min:.2f}°C to {scaled_max:.2f}°C (mean: {scaled_mean:.2f}°C)")
+        
+        # Check for temperature preservation
+        temp_increase = scaled_mean - original_mean
+        if abs(temp_increase) > 0.1:  # More than 0.1°C change is concerning
+            print(f"WARNING: Temperature mean changed by {temp_increase:.3f}°C during scaling")
+        else:
+            print("OK: Temperature values well preserved during scaling")
+    
+    return scaled_img
 
 def to_nan(img, adaptive_threshold=True):
     """
@@ -167,24 +219,53 @@ def pad_to_same_size(img1, img2):
     return center_pad(img1, H, W), center_pad(img2, H, W)
 
 def rotate_image_preserve_temps(img, angle):
-    """Rotate image while preserving temperature values"""
+    """Rotate image while preserving temperature values using conservative interpolation"""
     if angle == 0:
         return img
     
-    # Handle NaN values by filling temporarily during rotation
+    # Get temperature statistics for validation
     valid_mask = ~np.isnan(img)
+    if np.any(valid_mask):
+        valid_temps = img[valid_mask]
+        original_min = np.min(valid_temps)
+        original_max = np.max(valid_temps)
+        original_mean = np.mean(valid_temps)
+        print(f"Pre-rotation temperature range: {original_min:.2f}°C to {original_max:.2f}°C (mean: {original_mean:.2f}°C)")
+    
+    # Handle NaN values by filling temporarily during rotation
     min_temp = np.nanmin(img)
     fill_value = min_temp - 10.0 if not np.isnan(min_temp) else 15.0
     
     # Fill NaN values temporarily
     img_filled = np.where(valid_mask, img, fill_value)
     
-    # Rotate the image and mask
-    rotated_img = rotate(img_filled, angle, order=1, mode='constant', cval=fill_value, reshape=True)
-    rotated_mask = rotate(valid_mask.astype(float), angle, order=1, mode='constant', cval=0, reshape=True)
+    # Use nearest neighbor rotation to minimize temperature averaging
+    # order=0 prevents interpolation that can artificially increase temperatures
+    rotated_img = rotate(img_filled, angle, order=0, mode='constant', cval=fill_value, reshape=True)
+    rotated_mask = rotate(valid_mask.astype(float), angle, order=0, mode='constant', cval=0, reshape=True)
     
     # Restore NaN values where the mask indicates invalid data
-    return np.where(rotated_mask > 0.5, rotated_img, np.nan)
+    result = np.where(rotated_mask > 0.5, rotated_img, np.nan)
+    
+    # Validate temperature preservation after rotation
+    result_valid_mask = ~np.isnan(result)
+    if np.any(result_valid_mask):
+        result_valid_temps = result[result_valid_mask]
+        result_min = np.min(result_valid_temps)
+        result_max = np.max(result_valid_temps)
+        result_mean = np.mean(result_valid_temps)
+        
+        print(f"Post-rotation temperature range: {result_min:.2f}°C to {result_max:.2f}°C (mean: {result_mean:.2f}°C)")
+        
+        # Check for temperature preservation
+        if np.any(valid_mask):
+            temp_increase = result_mean - original_mean
+            if abs(temp_increase) > 0.1:  # More than 0.1°C change is concerning
+                print(f"WARNING: Temperature mean changed by {temp_increase:.3f}°C during rotation")
+            else:
+                print("OK: Temperature values well preserved during rotation")
+    
+    return result
 
 def create_binary_mask(img, adaptive_threshold=True):
     """Create binary mask from thermal image"""
@@ -545,20 +626,20 @@ def create_foot_overlay():
     axes[0, 2].axis('off')
     plt.colorbar(im3, ax=axes[0, 2])
     
-    # Row 2: Overlays with different transparencies
-    alphas = [0.3, 0.45, 0.6]
-    titles = ['Light Overlay (alpha=0.3)', 'Medium Overlay (alpha=0.45)', 'Heavy Overlay (alpha=0.6)']
+    # Row 2: Single overlay with alpha=0.6
+    # Clear the other subplot positions
+    axes[1, 1].remove()
+    axes[1, 2].remove()
     
-    for i, (alpha, title) in enumerate(zip(alphas, titles)):
-        axes[1, i].imshow(left_canvas, cmap=CMAP)  # Base: left foot
-        axes[1, i].imshow(right_canvas, cmap=CMAP, alpha=alpha)  # Overlay: right foot
-        axes[1, i].set_title(title)
-        axes[1, i].axis('off')
-        
-        # Add colorbar to middle overlay
-        if i == 1:
-            im_overlay = axes[1, i].imshow(left_canvas, cmap=CMAP)
-            plt.colorbar(im_overlay, ax=axes[1, i])
+    # Create single overlay in the first position
+    axes[1, 0].imshow(left_canvas, cmap=CMAP)  # Base: left foot
+    axes[1, 0].imshow(right_canvas, cmap=CMAP, alpha=0.6)  # Overlay: right foot
+    axes[1, 0].set_title('Foot Overlay (alpha=0.6)', fontsize=14, fontweight='bold')
+    axes[1, 0].axis('off')
+    
+    # Add colorbar to the overlay
+    im_overlay = axes[1, 0].imshow(left_canvas, cmap=CMAP)
+    plt.colorbar(im_overlay, ax=axes[1, 0])
     
     plt.tight_layout()
     
@@ -569,31 +650,76 @@ def create_foot_overlay():
     
     plt.show()
     
-    # Create a focused overlay for analysis
-    fig2, ax = plt.subplots(figsize=(10, 8))
-    
-    # Main overlay
-    im_base = ax.imshow(left_canvas, cmap=CMAP)
-    im_overlay = ax.imshow(right_canvas, cmap=CMAP, alpha=RIGHT_ALPHA)
-    
-    if ENABLE_ROTATION_OPTIMIZATION:
-        title_text = (f'Foot Overlay Analysis\\nLeft Foot (original) + Right Foot (rotated {rotation_angle}°, scaled alpha={RIGHT_ALPHA})\\n'
-                     f'Scale factors: x={scale_x:.3f}, y={scale_y:.3f}, Overlap score: {overlap_score:.3f}')
+    # Create a focused overlay for analysis (optional)
+    if ENABLE_FOCUSED_OVERLAY:
+        fig2, ax = plt.subplots(figsize=(10, 8))
+        
+        # Main overlay
+        im_base = ax.imshow(left_canvas, cmap=CMAP)
+        im_overlay = ax.imshow(right_canvas, cmap=CMAP, alpha=RIGHT_ALPHA)
+        
+        if ENABLE_ROTATION_OPTIMIZATION:
+            title_text = (f'Foot Overlay Analysis\\nLeft Foot (original) + Right Foot (rotated {rotation_angle}°, scaled alpha={RIGHT_ALPHA})\\n'
+                         f'Scale factors: x={scale_x:.3f}, y={scale_y:.3f}, Overlap score: {overlap_score:.3f}')
+        else:
+            title_text = (f'Foot Overlay Analysis\\nLeft Foot (original) + Right Foot (scaled alpha={RIGHT_ALPHA})\\n'
+                         f'Scale factors: x={scale_x:.3f}, y={scale_y:.3f}')
+        
+        ax.set_title(title_text)
+        ax.axis('off')
+        
+        # Add colorbar
+        cbar = plt.colorbar(im_base, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label('Temperature (°C)')
+        
+        # Save focused overlay with file identifier in filename
+        focused_path = os.path.join(OUTPUT_DIR, f"focused_foot_overlay_{SELECTED_FILE}.png")
+        plt.savefig(focused_path, dpi=300, bbox_inches='tight')
+        print(f"Focused overlay saved to: {focused_path}")
+        
+        plt.show()
     else:
-        title_text = (f'Foot Overlay Analysis\\nLeft Foot (original) + Right Foot (scaled alpha={RIGHT_ALPHA})\\n'
-                     f'Scale factors: x={scale_x:.3f}, y={scale_y:.3f}')
+        print("Focused overlay visualization disabled")
     
-    ax.set_title(title_text)
-    ax.axis('off')
+    # Create side-by-side comparison without overlay
+    fig3, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(16, 8))
     
-    # Add colorbar
-    cbar = plt.colorbar(im_base, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label('Temperature (°C)')
+    # Left foot
+    im_left = ax_left.imshow(left_canvas, cmap=CMAP)
+    ax_left.set_title('Left Foot (Original)', fontsize=14, fontweight='bold')
+    ax_left.axis('off')
+    cbar_left = plt.colorbar(im_left, ax=ax_left, fraction=0.046, pad=0.04)
+    cbar_left.set_label('Temperature (°C)', fontsize=12)
     
-    # Save focused overlay with file identifier in filename
-    focused_path = os.path.join(OUTPUT_DIR, f"focused_foot_overlay_{SELECTED_FILE}.png")
-    plt.savefig(focused_path, dpi=300, bbox_inches='tight')
-    print(f"Focused overlay saved to: {focused_path}")
+    # Right foot (processed)
+    im_right = ax_right.imshow(right_canvas, cmap=CMAP)
+    if ENABLE_ROTATION_OPTIMIZATION:
+        right_title = f'Right Foot (Mirrored, Rotated {rotation_angle}°, Scaled)'
+    else:
+        right_title = 'Right Foot (Mirrored, Scaled)'
+    ax_right.set_title(right_title, fontsize=14, fontweight='bold')
+    ax_right.axis('off')
+    cbar_right = plt.colorbar(im_right, ax=ax_right, fraction=0.046, pad=0.04)
+    cbar_right.set_label('Temperature (°C)', fontsize=12)
+    
+    # Add overall title with processing details
+    if ENABLE_ROTATION_OPTIMIZATION:
+        fig_title = (f'Side-by-Side Foot Comparison - {SELECTED_FILE.upper()}\n'
+                    f'Scale factors: x={scale_x:.3f}, y={scale_y:.3f} | '
+                    f'Rotation: {rotation_angle}° | Overlap score: {overlap_score:.3f}')
+    else:
+        fig_title = (f'Side-by-Side Foot Comparison - {SELECTED_FILE.upper()}\n'
+                    f'Scale factors: x={scale_x:.3f}, y={scale_y:.3f}')
+    
+    fig3.suptitle(fig_title, fontsize=16, fontweight='bold', y=0.95)
+    
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.85)  # Make room for the title
+    
+    # Save side-by-side comparison
+    sidebyside_path = os.path.join(OUTPUT_DIR, f"sidebyside_feet_{SELECTED_FILE}.png")
+    plt.savefig(sidebyside_path, dpi=300, bbox_inches='tight')
+    print(f"Side-by-side comparison saved to: {sidebyside_path}")
     
     plt.show()
     
