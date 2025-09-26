@@ -1,9 +1,10 @@
 # --------------------------------------------
-# Wound synthesis for single/all patients with:
-# - Variable develop/static days (synthetic extension over limited frames)
-# - Randomized wound target (left/right), region (heel/upper_foot), and position
-# - Multiple wound variants per patient
-# Keeps original logic/style, extends where needed.
+# Wound synthesis with:
+# - Foot correction (mirror/rotate/scale/pad) before any wound logic
+# - Contralateral-referenced temperature evolution (0 -> 3.5°C over DEV_DAYS)
+# - Relative wound sizing (with region coverage caps)
+# - Randomized side/region/position; synthetic timeline via modulo of source days
+# - Concise per-variant terminal update
 # --------------------------------------------
 
 import os
@@ -15,55 +16,81 @@ from scipy.io.matlab import MatReadWarning
 from scipy.ndimage import gaussian_filter
 from skimage.transform import rescale
 
-# Segmentation utilities
 from foot_part_identifier import segment_foot
+from foot_overlay_creator import (
+    to_nan, trim_to_content, mirror_horiz, pad_to_same_size,
+    rotate_image_preserve_temps, find_best_rotation_angle,
+    scale_image_preserve_temps
+)
 
 warnings.filterwarnings("ignore", category=MatReadWarning)
+
+# Silence noisy prints from imported helpers when enabled
+SUPPRESS_IMPORTED_LOGS = True
+
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+import sys, io, os
+
+@contextmanager
+def _silence_imported(enabled=True):
+    if not enabled:
+        yield
+        return
+    with open(os.devnull, "w") as devnull:
+        with redirect_stdout(devnull), redirect_stderr(devnull):
+            yield
 
 # ==========================
 # HIGH-LEVEL DATASET CONFIG
 # ==========================
-# Choose whether to run a single patient (gzX) or sweep gz1..gz15
 RUN_ALL_PATIENTS = False
-SINGLE_PATIENT_ID = "gz1"             # used only if RUN_ALL_PATIENTS=False
+SINGLE_PATIENT_ID = "gz1"
 PATIENT_PREFIX = "gz"
-PATIENT_COUNT  = 15                    # assume gz1..gz15 exist
-MAT_ROOT = "Data/Temp Data"            # where gz*.mat live
+PATIENT_COUNT  = 15
+MAT_ROOT = "Data/Temp Data"
 
-# How many distinct wounds to generate per patient
 WOUND_VARIANTS_PER_PATIENT = 3
-
-# Output root
 OUTPUT_ROOT = "output_images_wound_modes_segmented"
 
-# Optional reproducibility
-GLOBAL_SEED = None   # e.g., 123; set None to be fully random
+GLOBAL_SEED = None  # e.g., 123
 
+# Log one concise line per variant
+LOG_VARIANT_ASSIGNMENTS = True
 
 # ==========================
 # GENERATION/GROWTH CONFIG
 # ==========================
-# generation_mode: "static", "developing", or "both"
-GENERATION_MODE = "both"
+GENERATION_MODE = "both"   # "static", "developing", "both"
+DEV_DAYS    = 20
+STATIC_DAYS = 10
 
-# For synthetic timelines (works for any number of available source days)
-DEV_DAYS    = 20   # variable, default 20
-STATIC_DAYS = 10   # variable, default 10
-# If GENERATION_MODE is "developing", you get DEV_DAYS images.
-# If "static", you get STATIC_DAYS images.
-# If "both", you get DEV_DAYS + STATIC_DAYS images (first grow, then hold).
-
-# Development behavior (unchanged defaults)
 DEVELOP_MODE        = "size+intensity"  # "size+intensity" | "intensity-only"
 INITIAL_SIZE_SCALE  = 0.05
-INITIAL_TEMP_SCALE  = 0.05
+INITIAL_TEMP_SCALE  = 0.05  # kept for compatibility (not used by new temp evolution)
+
+# ---- Relative size policy (prevents huge wounds on padded canvases) ----
+SIZE_POLICY = "relative"    # "relative" (recommended) | "absolute"
+
+# Relative sizing (fractions of min(ref_h, ref_w))
+CORE_RADIUS_FRAC_RANGE = (0.025, 0.040)     # ~2.5%..4.0% of min dimension
+INFLAM_OVER_CORE_RATIO = (1.6, 2.2)         # inflam radius = core * ratio
+# Max final coverage (fraction of target region)
+MAX_INFLAM_REGION_COVERAGE = 0.08           # 8%
+MAX_CORE_REGION_COVERAGE   = 0.03           # 3%
+
+# Absolute sizing fallback (narrowed)
+ABS_CORE_RADIUS_RANGE   = (8, 15)
+ABS_INFLAM_RADIUS_RANGE = (16, 28)
 
 # Visualization / formatting
-GAP_COLS = 5
-FIGSIZE = (8, 6)
+FIGSIZE = (9, 6)
 CMAP = "hot"
+GAP_COLS = 5
 CBAR_FRACTION = 0.035
 CBAR_PAD = 0.04
+
+# Temperature increment target
+FINAL_INCREMENT_DEG_C = 3.0  # progresses 0 -> 3.0 °C over DEV_DAYS
 
 # --------------------------------------------
 # Randomization helpers (per-variant diversity)
@@ -72,60 +99,84 @@ def rng(seed=None):
     return np.random.default_rng(seed) if seed is not None else np.random.default_rng()
 
 def sample_variant_params(rng_):
-    """
-    Randomize wound-side, region and placement-related aspects (plus a few extras).
-    Kept conservative to preserve your original behavior.
-    """
+    # Radii are chosen later (relative policy) after we know canvas/region.
     params = {
-        # required by request
         "apply_to": rng_.choice(["left", "right"]),
-        "apply_wound_to": rng_.choice(["heel", "upper_foot"]),
-        "position_mode": 2,                 # 2=random in target region
-        "manual_coord": (150, 180),         # unused unless position_mode==3
-
-        # wound geometry & thermals (kept near original defaults)
+        "apply_wound_to": rng_.choice(["heel", "upper_foot", "mid_foot"]),
+        "position_mode": 2,                 # random in region
+        "manual_coord": (150, 180),
         "shape_mode": rng_.choice(["circle", "multi"]),
-        "core_radius_final": int(rng_.integers(12, 21)),      # ~15 ±
-        "inflam_radius_final": int(rng_.integers(24, 36)),    # ~30 ±
-        "core_temp_final": float(rng_.uniform(3.5, 6.0)),     # ~5.0 ±
-        "inflam_temp_final": float(rng_.uniform(2.0, 4.5)),   # ~3.0 ±
-        "blur_sigma_core": float(rng_.uniform(5.0, 7.5)),     # ~6.0 ±
-        "blur_sigma_inflam": float(rng_.uniform(5.0, 7.5)),   # ~6.0 ±
+        # Legacy placeholders; used only if SIZE_POLICY="absolute"
+        "core_radius_final": int(rng_.integers(*ABS_CORE_RADIUS_RANGE)),
+        "inflam_radius_final": int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE)),
+        "blur_sigma_core": float(rng_.uniform(5.0, 7.0)),
+        "blur_sigma_inflam": float(rng_.uniform(5.0, 7.0)),
         "multi_min_blobs": 2,
         "multi_max_blobs": 6,
-
-        # growth mode details
         "develop_mode": DEVELOP_MODE,
         "initial_size_scale": INITIAL_SIZE_SCALE,
         "initial_temp_scale": INITIAL_TEMP_SCALE,
     }
     return params
 
-
 # ==========================
-# Core helpers (kept close to original)
+# Helpers
 # ==========================
 def to_display(img2d):
-    """Map 0 -> NaN for visualization/overlay math."""
     return np.where(img2d == 0, np.nan, img2d)
 
-def trim_empty_columns(img):
-    """Remove fully-zero/NaN columns to bring feet closer."""
-    valid_cols = ~(np.all(np.isnan(img) | (img == 0), axis=0))
-    return img[:, valid_cols]
+def _normalize_region_name(name: str) -> str:
+    n = (name or "").strip().lower()
+    if n in {"heel", "calcaneus"}:                   return "heel"
+    if n in {"mid", "mid_foot", "midfoot", "arch"}:  return "mid_foot"
+    if n in {"upper", "upper_foot", "upperfoot", "toes", "forefoot"}:
+        return "upper_foot"
+    return "upper_foot"
+
+def _build_full_region_mask(heel, mid, upper, region_key):
+    nan_heel = np.full_like(heel, np.nan)
+    nan_mid  = np.full_like(mid,  np.nan)
+    nan_up   = np.full_like(upper, np.nan)
+    if region_key == "heel":
+        full = np.vstack((heel, nan_mid, nan_up))
+    elif region_key == "mid_foot":
+        full = np.vstack((nan_heel, mid, nan_up))
+    else:  # "upper_foot"
+        full = np.vstack((nan_heel, nan_mid, upper))
+    return full
+
+def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode, rng_):
+    heel, mid_foot, upper_foot = segment_foot(target_foot_img)
+    h, w = target_foot_img.shape
+    region_key = _normalize_region_name(apply_wound_to)
+    region_full = _build_full_region_mask(heel, mid_foot, upper_foot, region_key)
+    ys, xs = np.where(~np.isnan(region_full))
+    if len(xs) == 0:
+        ys, xs = np.where(~np.isnan(target_foot_img))
+    if position_mode == 1:
+        y_center = int(np.mean(ys)); x_center = int(np.mean(xs))
+    elif position_mode == 2:
+        idx = int(rng_.integers(len(ys)))
+        y_center, x_center = int(ys[idx]), int(xs[idx])
+    elif position_mode == 3:
+        y_center, x_center = manual_coord
+    else:
+        raise ValueError("Invalid position_mode")
+    chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else rng_.choice(["circle", "multi"])
+    return y_center, x_center, chosen_shape, h, w, region_full, region_key
 
 def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_radius_final,
                      multi_min_blobs, multi_max_blobs, h, w, rng_):
     """
-    Final locked shape (core + inflammation). Re-implements your original,
-    but without relying on global X/Y.
+    Returns: final_core_mask, final_inflam_mask, blob_count
+    - blob_count = 1 for 'circle', or the sampled number of blobs for 'multi'
     """
     Y, X = np.ogrid[:h, :w]
 
     if shape_mode == "circle":
         final_core_mask   = (X - x_center)**2 + (Y - y_center)**2 <= core_radius_final**2
         final_inflam_mask = (X - x_center)**2 + (Y - y_center)**2 <= inflam_radius_final**2
-        return final_core_mask, final_inflam_mask
+        return final_core_mask, final_inflam_mask, 1
 
     # multi-blob union
     n_blobs = int(rng_.integers(multi_min_blobs, multi_max_blobs + 1))
@@ -151,160 +202,125 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
         core_mask_bin   |= (X - cx)**2 + (Y - cy)**2 <= rc**2
         inflam_mask_bin |= (X - cx)**2 + (Y - cy)**2 <= ri**2
 
-    return core_mask_bin, inflam_mask_bin
+    return core_mask_bin, inflam_mask_bin, n_blobs
 
 def scale_mask(mask, scale_factor, h, w):
-    """Scale a binary mask around its centroid (kept from your original idea)."""
     ys, xs = np.where(mask)
-    if len(xs) == 0 or len(ys) == 0:
+    if len(xs) == 0:
         return mask
     cx, cy = np.mean(xs), np.mean(ys)
-
-    # recenter to middle
     shift_x, shift_y = w//2 - cx, h//2 - cy
     shifted = np.roll(mask, (int(shift_y), int(shift_x)), axis=(0, 1)).astype(float)
-
-    resized = rescale(shifted, scale=scale_factor, preserve_range=True,
-                      anti_aliasing=True, order=1)
-
+    resized = rescale(shifted, scale=scale_factor, preserve_range=True, anti_aliasing=True, order=1)
     rh, rw = resized.shape
     out = np.zeros((h, w), dtype=bool)
     sy = max((h - rh)//2, 0); sx = max((w - rw)//2, 0)
     ey = min(h, sy + rh);     ex = min(w, sx + rw)
     out[sy:ey, sx:ex] = resized[:ey-sy, :ex-sx] > 0.5
-
-    # shift back
     final = np.roll(out, (-int(shift_y), -int(shift_x)), axis=(0, 1))
     return final
 
-def make_mask(progress, final_core_mask, final_inflam_mask, params, h, w):
-    """
-    Build the per-day thermal overlay with blur (unchanged math, just parameterized).
-    """
-    generation_mode = params.get("generation_mode", "developing")
-    develop_mode    = params["develop_mode"]
-
-    core_val   = params["core_temp_final"]
-    inflam_val = params["inflam_temp_final"]
-
-    if generation_mode == "static":
+def masks_for_progress(progress, final_core_mask, final_inflam_mask, params, h, w):
+    if params["develop_mode"] == "size+intensity":
+        scale_factor = params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress
+        core_mask   = scale_mask(final_core_mask,   scale_factor, h, w)
+        inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
+    elif params["develop_mode"] == "intensity-only":
         core_mask   = final_core_mask
         inflam_mask = final_inflam_mask
     else:
-        if develop_mode == "size+intensity":
-            scale_factor = params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress
-            core_mask   = scale_mask(final_core_mask,   scale_factor, h, w)
-            inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
-            core_val   *= (params["initial_temp_scale"] + (1 - params["initial_temp_scale"]) * progress)
-            inflam_val *= (params["initial_temp_scale"] + (1 - params["initial_temp_scale"]) * progress)
-        elif develop_mode == "intensity-only":
-            core_mask   = final_core_mask
-            inflam_mask = final_inflam_mask
-            core_val   *= (params["initial_temp_scale"] + (1 - params["initial_temp_scale"]) * progress)
-            inflam_val *= (params["initial_temp_scale"] + (1 - params["initial_temp_scale"]) * progress)
+        raise ValueError("Unknown develop_mode")
+    return core_mask, inflam_mask
+
+def nanmean_safe(arr):
+    vals = arr[~np.isnan(arr)]
+    if vals.size == 0:
+        return np.nan
+    return float(np.mean(vals))
+
+def soft_blend_set(base_canvas, target_value, mask_binary, sigma):
+    if mask_binary.dtype != float:
+        mask_float = mask_binary.astype(float)
+    else:
+        mask_float = mask_binary
+    soft = gaussian_filter(mask_float, sigma=sigma)
+    mmax = np.nanmax(soft)
+    if not np.isfinite(mmax) or mmax == 0:
+        return base_canvas
+    soft = soft / mmax
+    out = np.array(base_canvas, copy=True)
+    valid = ~np.isnan(base_canvas)
+    w = np.clip(soft, 0, 1)
+    out[valid] = base_canvas[valid] * (1 - w[valid]) + target_value * w[valid]
+    return out
+
+# ---------------------------
+# Feet correction per day
+# ---------------------------
+def correct_align_feet_for_day(scan_left, scan_right):
+    with _silence_imported(SUPPRESS_IMPORTED_LOGS):
+        img_left  = trim_to_content(to_nan(scan_left,  adaptive_threshold=True))
+        img_right = trim_to_content(to_nan(scan_right, adaptive_threshold=True))
+        img_right_mir = mirror_horiz(img_right)
+        angle, score, _scores = find_best_rotation_angle(img_left, img_right_mir)
+        if angle != 0:
+            img_right_mir = rotate_image_preserve_temps(img_right_mir, angle)
+        if img_right_mir.shape != img_left.shape:
+            scale_x = img_left.shape[1] / img_right_mir.shape[1]
+            scale_y = img_left.shape[0] / img_right_mir.shape[0]
+            img_right_scaled = scale_image_preserve_temps(img_right_mir, scale_x, scale_y)
         else:
-            raise ValueError("Unknown develop_mode")
+            img_right_scaled = img_right_mir
+            scale_x = scale_y = 1.0
+        left_canvas, right_canvas = pad_to_same_size(img_left, img_right_scaled)
 
-    mask_core   = np.zeros((h, w)); mask_core[core_mask]     = core_val
-    mask_inflam = np.zeros((h, w)); mask_inflam[inflam_mask] = inflam_val
+    info = {"rotation_angle": float(angle), "overlap_score": float(score),
+            "scale_x": float(scale_x), "scale_y": float(scale_y),
+            "canvas_shape": left_canvas.shape}
+    return left_canvas, right_canvas, info
 
-    mask_core   = gaussian_filter(mask_core,   sigma=params["blur_sigma_core"])
-    mask_inflam = gaussian_filter(mask_inflam, sigma=params["blur_sigma_inflam"])
-    return np.maximum(mask_inflam, mask_core)
+def center_pad_to(img, target_h, target_w):
+    h, w = img.shape
+    canvas = np.full((target_h, target_w), np.nan, dtype=float)
+    top = max(0, (target_h - h) // 2)
+    left = max(0, (target_w - w) // 2)
+    canvas[top:top+h, left:left+w] = img
+    return canvas
 
-def select_center_and_shape(left_crop, right_crop, apply_to, apply_wound_to,
-                            position_mode, manual_coord, shape_mode, rng_):
-    """
-    Pick a wound center strictly inside the requested anatomical region
-    using global image coordinates (no accidental heel hits).
-    """
-    # 1) Extract current day's images just to size and segment (day 0 is fine)
-    scan_left  = left_crop[0, 0]
-    scan_right = right_crop[0, 0]
-    img_left   = np.where(scan_left == 0,  np.nan, scan_left)
-    img_right  = np.where(scan_right == 0, np.nan, scan_right)
-
-    # Which foot to target
-    target_foot = img_left if apply_to == "left" else img_right
-    h, w = target_foot.shape
-
-    # 2) Segment target foot into slices
-    heel_slice, mid_slice, upper_slice = segment_foot(target_foot)  # heel, mid, upper(bottom in array)
-    # Sanity: widths should match
-    if not (heel_slice.shape[1] == mid_slice.shape[1] == upper_slice.shape[1] == w):
-        raise RuntimeError("segment_foot returned slices with mismatched widths.")
-
-    # 3) Build a full-height mask for the requested region (global coords)
-    region_key = _normalize_region_name(apply_wound_to)
-    region_full = _build_full_region_mask(heel_slice, mid_slice, upper_slice, region_key)
-
-    # 4) Sample strictly inside the region
-    ys, xs = np.where(~np.isnan(region_full))
-    if len(xs) == 0:
-        # If the region is empty for some odd image, fall back to any non-NaN pixel of the target foot
-        ys, xs = np.where(~np.isnan(target_foot))
-
-    if position_mode == 1:
-        y_center = int(np.mean(ys)); x_center = int(np.mean(xs))
-    elif position_mode == 2:
-        idx = int(rng_.integers(len(ys)))
-        y_center, x_center = int(ys[idx]), int(xs[idx])
-    elif position_mode == 3:
-        y_center, x_center = manual_coord
+# ---- Radii selection & caps ----
+def pick_final_radii(h, w, region_full, rng_, params):
+    if SIZE_POLICY == "relative":
+        min_dim = float(min(h, w))
+        core_frac = rng_.uniform(*CORE_RADIUS_FRAC_RANGE)
+        core_r = int(max(2, round(min_dim * core_frac)))
+        ratio = rng_.uniform(*INFLAM_OVER_CORE_RATIO)
+        inflam_r = int(max(core_r + 1, round(core_r * ratio)))
     else:
-        raise ValueError("Invalid position_mode")
+        core_r   = int(rng_.integers(*ABS_CORE_RADIUS_RANGE))
+        inflam_r = int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE))
+        inflam_r = max(inflam_r, core_r + 1)
+    return core_r, inflam_r
 
-    # Guard: ensure the chosen center sits in the intended region
-    in_region = not np.isnan(region_full[y_center, x_center])
-    if not in_region:
-        # Try a few resamples before giving up
-        for _ in range(25):
-            idx = int(rng_.integers(len(ys)))
-            y_try, x_try = int(ys[idx]), int(xs[idx])
-            if not np.isnan(region_full[y_try, x_try]):
-                y_center, x_center = y_try, x_try
-                in_region = True
-                break
-    if not in_region:
-        raise RuntimeError(f"Could not place center inside requested region '{region_key}'.")
+def enforce_region_coverage_cap(final_core_mask, final_inflam_mask, region_full, h, w):
+    region_area = np.count_nonzero(~np.isnan(region_full))
+    if region_area == 0:
+        return final_core_mask, final_inflam_mask
+    inflam_area = int(np.count_nonzero(final_inflam_mask))
+    core_area   = int(np.count_nonzero(final_core_mask))
+    inflam_frac = inflam_area / region_area
+    core_frac   = core_area / region_area
 
-    # Shape choice (keep your variety)
-    chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else rng_.choice(["circle", "multi"])
+    scale_needed = 1.0
+    if inflam_frac > MAX_INFLAM_REGION_COVERAGE:
+        scale_needed = min(scale_needed, np.sqrt(MAX_INFLAM_REGION_COVERAGE / max(inflam_frac, 1e-8)))
+    if core_frac > MAX_CORE_REGION_COVERAGE:
+        scale_needed = min(scale_needed, np.sqrt(MAX_CORE_REGION_COVERAGE / max(core_frac, 1e-8)))
 
-    # Debug log (helps when auditing results)
-    print(f"[select_center_and_shape] target_foot={apply_to}, region={region_key}, center=({y_center},{x_center}), shape={chosen_shape}")
+    if scale_needed < 1.0:
+        final_inflam_mask = scale_mask(final_inflam_mask, scale_needed, h, w)
+        final_core_mask   = scale_mask(final_core_mask,   scale_needed, h, w)
 
-    return y_center, x_center, chosen_shape, h, w
-
-def _normalize_region_name(name: str) -> str:
-    """Map user-friendly aliases to canonical region keys."""
-    n = (name or "").strip().lower()
-    if n in {"heel", "calcaneus"}:
-        return "heel"
-    if n in {"upper", "upper_foot", "upperfoot", "toes", "forefoot"}:
-        return "upper_foot"
-    if n in {"mid", "mid_foot", "midfoot", "arch"}:
-        return "mid_foot"
-    # default to upper_foot (safer for training variety)
-    return "upper_foot"
-
-def _build_full_region_mask(heel, mid, upper, region_key):
-    """Recreate a full-height mask where only the target slice is kept."""
-    # All three share the same width; heights sum to original height.
-    nan_heel = np.full_like(heel, np.nan)
-    nan_mid  = np.full_like(mid,  np.nan)
-    nan_up   = np.full_like(upper, np.nan)
-
-    if region_key == "heel":
-        full = np.vstack((heel, nan_mid, nan_up))
-    elif region_key == "mid_foot":
-        full = np.vstack((nan_heel, mid, nan_up))
-    elif region_key == "upper_foot":
-        full = np.vstack((nan_heel, nan_mid, upper))
-    else:
-        # Should never happen, but avoid surprises
-        full = np.vstack((nan_heel, nan_mid, upper))
-    return full
+    return final_core_mask, final_inflam_mask
 
 # ==========================
 # Synthetic day iterator
@@ -314,55 +330,65 @@ def compute_timeline(mode, dev_days, static_days):
         return dev_days, ("developing",)
     if mode == "static":
         return static_days, ("static",)
-    # "both"
     return dev_days + static_days, ("developing", "static")
-
 
 # ==========================
 # Per-variant runner
 # ==========================
 def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode, dev_days, static_days, out_root, seed=None):
     rng_ = rng(seed)
-
-    # Randomize the variant
     params = sample_variant_params(rng_)
-    params.update(base_params)  # allow global develop_mode / scales
+    params.update(base_params)
     params["generation_mode"] = mode
 
-    # Load data
     mat = scipy.io.loadmat(mat_path)
-    left_crop  = mat["Indirect_plantar_Right_crop"]  # (project convention)
+    left_crop  = mat["Indirect_plantar_Right_crop"]   # project convention
     right_crop = mat["Indirect_plantar_Left_crop"]
+    num_src_days = left_crop.shape[0]
 
-    num_src_days = left_crop.shape[0]  # typically 10
+    # ---- Reference corrected canvases + choose center/shape on Day 0 ----
+    ref_left, ref_right, info0 = correct_align_feet_for_day(left_crop[0,0], right_crop[0,0])
+    ref_h, ref_w = ref_left.shape
 
-    # Choose center + shape
-    y_center, x_center, shape_mode, h, w = select_center_and_shape(
-        left_crop, right_crop,
-        params["apply_to"], params["apply_wound_to"],
-        params["position_mode"], params["manual_coord"],
-        params["shape_mode"], rng_
+    target_img = ref_left if params["apply_to"] == "left" else ref_right
+    (y_center, x_center, shape_mode, _, _, region_full, region_key
+     ) = select_center_and_shape_on_image(
+        target_img, params["apply_wound_to"], params["position_mode"],
+        params["manual_coord"], params["shape_mode"], rng_
     )
 
-    # Build final (locked) shape
-    final_core_mask, final_inflam_mask = build_final_mask(
+    # ---- Radii (relative) & coverage caps ----
+    core_r, inflam_r = pick_final_radii(ref_h, ref_w, region_full, rng_, params)
+    final_core_mask, final_inflam_mask, blob_count = build_final_mask(
         shape_mode, x_center, y_center,
-        params["core_radius_final"], params["inflam_radius_final"],
+        core_r, inflam_r,
         params["multi_min_blobs"], params["multi_max_blobs"],
-        h, w, rng_
+        ref_h, ref_w, rng_
+    )
+    final_core_mask, final_inflam_mask = enforce_region_coverage_cap(
+        final_core_mask, final_inflam_mask, region_full, ref_h, ref_w
     )
 
-    # Prepare output dir
+    # ---- Concise per-variant terminal update (non-spammy) ----
+    if LOG_VARIANT_ASSIGNMENTS:
+        extra = f", blobs={blob_count}" if shape_mode == "multi" else ""
+        print(
+            f"[patient={patient_id}] variant={variant_idx:02d} | "
+            f"target_foot={params['apply_to']}, region={region_key}, "
+            f"center=({y_center},{x_center}), shape={shape_mode}{extra}"
+        )
+
+    # Output dirs
     total_days, phases = compute_timeline(mode, dev_days, static_days)
-    subdir = os.path.join(
-        out_root,
-        f"{patient_id}",
-        f"variant_{variant_idx:02d}",
+    subdir_root = os.path.join(
+        out_root, f"{patient_id}", f"variant_{variant_idx:02d}",
         f"{mode}_dev{dev_days}_stat{static_days}"
     )
-    os.makedirs(subdir, exist_ok=True)
+    subdir_png = os.path.join(subdir_root, "png")
+    subdir_mat = os.path.join(subdir_root, "mat")
+    os.makedirs(subdir_png, exist_ok=True)
+    os.makedirs(subdir_mat, exist_ok=True)
 
-    # Save a tiny metadata file for traceability
     meta = {
         "patient": patient_id,
         "variant": int(variant_idx),
@@ -371,106 +397,151 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         "static_days": int(static_days),
         "apply_to": params["apply_to"],
         "apply_wound_to": params["apply_wound_to"],
-        "position_mode": params["position_mode"],
+        "region_key": region_key,
         "center": (int(y_center), int(x_center)),
         "shape_mode": shape_mode,
-        "core_radius_final": int(params["core_radius_final"]),
-        "inflam_radius_final": int(params["inflam_radius_final"]),
-        "core_temp_final": float(params["core_temp_final"]),
-        "inflam_temp_final": float(params["inflam_temp_final"]),
+        "core_radius_final_px": int(core_r),
+        "inflam_radius_final_px": int(inflam_r),
         "blur_sigma_core": float(params["blur_sigma_core"]),
         "blur_sigma_inflam": float(params["blur_sigma_inflam"]),
         "develop_mode": params["develop_mode"],
         "initial_size_scale": float(params["initial_size_scale"]),
         "initial_temp_scale": float(params["initial_temp_scale"]),
+        "ref_canvas_shape": (int(ref_h), int(ref_w)),
+        "foot_correction_info_day0": info0,
+        "size_policy": SIZE_POLICY,
+        "coverage_caps": {
+            "max_inflam_region_coverage": MAX_INFLAM_REGION_COVERAGE,
+            "max_core_region_coverage": MAX_CORE_REGION_COVERAGE
+        },
+        "relative_ranges": {
+            "core_radius_frac_range": CORE_RADIUS_FRAC_RANGE,
+            "inflam_over_core_ratio": INFLAM_OVER_CORE_RATIO
+        },
+        "absolute_ranges_px": {
+            "core_radius_px": ABS_CORE_RADIUS_RANGE,
+            "inflam_radius_px": ABS_INFLAM_RADIUS_RANGE
+        }
     }
     try:
-        scipy.io.savemat(os.path.join(subdir, "variant_metadata.mat"), {"metadata": meta})
+        scipy.io.savemat(os.path.join(subdir_mat, "variant_metadata.mat"), {"metadata": meta})
     except Exception:
         pass
 
-    # Main timeline loop with synthetic day extension
+    # ---- Timeline ----
     for i in range(total_days):
-        src_day = i % num_src_days  # 0..9 cycling, extends timeline synthetically
+        src_day = i % num_src_days
+
+        left_can, right_can, info_day = correct_align_feet_for_day(left_crop[src_day,0], right_crop[src_day,0])
+        if left_can.shape != (ref_h, ref_w):
+            left_can  = center_pad_to(left_can,  ref_h, ref_w)
+            right_can = center_pad_to(right_can, ref_h, ref_w)
 
         if mode == "both":
             current_phase = "developing" if i < dev_days else "static"
-            progress = (i + 1) / dev_days if i < dev_days and dev_days > 0 else 1.0
+            progress = ((i + 1) / dev_days) if i < dev_days and dev_days > 0 else 1.0
         elif mode == "developing":
             current_phase = "developing"
-            progress = (i + 1) / dev_days if dev_days > 0 else 1.0
-        else:  # "static"
+            progress = ((i + 1) / dev_days) if dev_days > 0 else 1.0
+        else:
             current_phase = "static"
             progress = 1.0
 
-        # Make overlay for this (synthetic) day
-        mask_day = make_mask(progress, final_core_mask, final_inflam_mask, params, h, w)
-
-        scan_left  = left_crop[src_day, 0]
-        scan_right = right_crop[src_day, 0]
-        img_left   = to_display(scan_left)
-        img_right  = to_display(scan_right)
+        core_mask, inflam_mask = masks_for_progress(progress, final_core_mask, final_inflam_mask, params, ref_h, ref_w)
 
         if params["apply_to"] == "left":
-            img_left_w  = np.where(~np.isnan(img_left),  img_left  + mask_day, np.nan)
-            img_right_w = img_right
+            wounded_canvas = np.array(left_can,  copy=True)
+            normal_canvas  = right_can
         else:
-            img_left_w  = img_left
-            img_right_w = np.where(~np.isnan(img_right), img_right + mask_day, np.nan)
+            wounded_canvas = np.array(right_can, copy=True)
+            normal_canvas  = left_can
 
-        img_left_trim  = trim_empty_columns(img_left_w)
-        img_right_trim = trim_empty_columns(img_right_w)
+        core_base   = nanmean_safe(normal_canvas[core_mask])
+        inflam_base = nanmean_safe(normal_canvas[inflam_mask])
+        if not np.isfinite(core_base):   core_base   = nanmean_safe(normal_canvas)
+        if not np.isfinite(inflam_base): inflam_base = nanmean_safe(normal_canvas)
 
-        gap = np.full((img_left_trim.shape[0], GAP_COLS), np.nan)
-        combined = np.hstack((img_left_trim, gap, img_right_trim))
+        increment = FINAL_INCREMENT_DEG_C * (progress if current_phase == "developing" else 1.0)
+        core_target   = core_base   + increment
+        inflam_target = inflam_base + increment
 
-        # Figure
+        wounded_canvas = soft_blend_set(wounded_canvas, inflam_target, inflam_mask, sigma=params["blur_sigma_inflam"])
+        wounded_canvas = soft_blend_set(wounded_canvas, core_target,   core_mask,   sigma=params["blur_sigma_core"])
+
+        if params["apply_to"] == "left":
+            left_wounded, right_wounded = wounded_canvas, right_can
+        else:
+            left_wounded, right_wounded = left_can, wounded_canvas
+
+        # PNG debug (flip right back only for display)
+        right_display = mirror_horiz(right_wounded)
+        left_display  = left_wounded
+        gap = np.full((ref_h, GAP_COLS), np.nan)
+        combined = np.hstack((left_display, gap, right_display))
+
         fig, ax = plt.subplots(figsize=FIGSIZE)
         im = ax.imshow(combined, cmap=CMAP)
         ax.axis("off")
-        title = (f"{patient_id} • Var {variant_idx:02d} • Day {i+1:02d} "
-                 f"(src {src_day+1:02d}) — {current_phase} ({params['apply_to']}, {params['apply_wound_to']})")
-        ax.set_title(title)
-        cbar = fig.colorbar(im, ax=ax, fraction=CBAR_FRACTION, pad=CBAR_PAD)
+        title = (
+            f"{patient_id} • Var {variant_idx:02d} • Day {i+1:02d} (src {src_day+1:02d}) — {current_phase}\n"
+            f"{params['apply_to']} / {region_key} | "
+            f"core_base={core_base:.2f}°C→{core_target:.2f}°C, "
+            f"inflam_base={inflam_base:.2f}°C→{inflam_target:.2f}°C, "
+            f"Δ={increment:.2f}°C | core_r={core_r}px, inflam_r={inflam_r}px"
+        )
+        ax.set_title(title, fontsize=10)
+        cbar = plt.colorbar(im, ax=ax, fraction=CBAR_FRACTION, pad=CBAR_PAD)
         cbar.set_label("Temperature (°C)")
 
-        out_png = os.path.join(subdir, f"{patient_id}_v{variant_idx:02d}_d{i+1:02d}_src{src_day+1:02d}_{current_phase}.png")
+        out_png = os.path.join(
+            subdir_png,
+            f"{patient_id}_v{variant_idx:02d}_d{i + 1:02d}_src{src_day + 1:02d}_{current_phase}.png"
+        )
+
         plt.savefig(out_png, dpi=300, bbox_inches="tight")
         plt.close()
 
-        # Save MAT for training pipelines (trimmed feet + wound mask)
+        # MAT save
         try:
             scipy.io.savemat(
-                os.path.join(subdir, f"{patient_id}_v{variant_idx:02d}_d{i+1:02d}_{current_phase}.mat"),
+                os.path.join(
+                    subdir_mat,
+                    f"{patient_id}_v{variant_idx:02d}_d{i + 1:02d}_{current_phase}.mat"
+                ),
                 {
-                    "left_foot":  img_left_trim,
-                    "right_foot": img_right_trim,
-                    "wound_mask": mask_day,
+                    "left_canvas": left_can,
+                    "right_canvas": right_can,
+                    "left_wounded": left_wounded,
+                    "right_wounded": right_wounded,
+                    "core_mask": core_mask,
+                    "inflam_mask": inflam_mask,
+                    "core_base": float(core_base),
+                    "inflam_base": float(inflam_base),
+                    "increment": float(increment),
+                    "core_target": float(core_target),
+                    "inflam_target": float(inflam_target),
                     "phase": current_phase,
                     "progress": float(progress),
+                    "foot_correction_info": info_day
                 }
             )
         except Exception:
             pass
 
-
 # ==========================
-# Entry point
+# Entry
 # ==========================
 if __name__ == "__main__":
     if GLOBAL_SEED is not None:
         np.random.seed(GLOBAL_SEED)
 
-    # Determine patients
     if RUN_ALL_PATIENTS:
         patient_ids = [f"{PATIENT_PREFIX}{i}" for i in range(1, PATIENT_COUNT + 1)]
     else:
         patient_ids = [SINGLE_PATIENT_ID]
 
-    # How many days to output
     if GENERATION_MODE == "both":
-        dev_days    = int(DEV_DAYS)
-        static_days = int(STATIC_DAYS)
+        dev_days, static_days = int(DEV_DAYS), int(STATIC_DAYS)
     elif GENERATION_MODE == "developing":
         dev_days, static_days = int(DEV_DAYS), 0
     elif GENERATION_MODE == "static":
@@ -478,14 +549,12 @@ if __name__ == "__main__":
     else:
         raise ValueError("GENERATION_MODE must be 'static', 'developing', or 'both'")
 
-    # Base (non-random) settings inherited by every variant
     base_params = {
         "develop_mode": DEVELOP_MODE,
         "initial_size_scale": INITIAL_SIZE_SCALE,
         "initial_temp_scale": INITIAL_TEMP_SCALE,
     }
 
-    # Run
     for pid in patient_ids:
         mat_path = os.path.join(MAT_ROOT, f"{pid}.mat")
         for v in range(1, WOUND_VARIANTS_PER_PATIENT + 1):
