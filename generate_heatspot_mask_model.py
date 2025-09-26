@@ -92,6 +92,10 @@ CBAR_PAD = 0.04
 # Temperature increment target
 FINAL_INCREMENT_DEG_C = 3.0  # progresses 0 -> 3.0 °C over DEV_DAYS
 
+# Debug mark (Day 1 only)
+MARK_CENTER_ON_FIRST_DAY = True
+CENTER_DOT_SIZE = 36  # tweak if you want it bigger/smaller
+
 # --------------------------------------------
 # Randomization helpers (per-variant diversity)
 # --------------------------------------------
@@ -492,6 +496,32 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         ax.set_title(title, fontsize=10)
         cbar = plt.colorbar(im, ax=ax, fraction=CBAR_FRACTION, pad=CBAR_PAD)
         cbar.set_label("Temperature (°C)")
+
+        # --- Day-1 center marker (green dot) for quick visual debugging ---
+        if MARK_CENTER_ON_FIRST_DAY and i == 0:
+            # Compute where the center lands in the stitched display
+            # Left display is not mirrored; right display is mirrored for aesthetics.
+            if params["apply_to"] == "left":
+                dot_x = x_center  # stays the same
+                dot_y = y_center
+                # no horizontal offset (it's on the left panel)
+            else:
+                # mirrored horizontally in the DISPLAY ONLY
+                dot_x = (ref_w - 1 - x_center)  # mirror across width
+                dot_y = y_center
+                # shift by left panel width + gap to land in the right panel
+                dot_x += ref_w + GAP_COLS
+
+            # Draw the dot
+            ax.scatter(
+                [dot_x], [dot_y],
+                s=CENTER_DOT_SIZE,
+                c="lime",
+                marker="o",
+                edgecolors="black",
+                linewidths=0.6,
+                zorder=5,
+            )
 
         out_png = os.path.join(
             subdir_png,
