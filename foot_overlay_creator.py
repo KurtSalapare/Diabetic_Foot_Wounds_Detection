@@ -37,6 +37,7 @@ ROTATION_ANGLE_STEP = 1  # Step size for angle testing (degrees) - 1° for finer
 
 # Visualization settings
 ENABLE_FOCUSED_OVERLAY = False  # Set to False to skip the focused overlay visualization
+ENABLE_INTERACTIVE_PLOTS = False  # Set to False to disable plt.show() - REQUIRED for PyCharm/IDE compatibility!
 
 MAT_FILE = AVAILABLE_MAT_FILES[SELECTED_FILE]
 OUTPUT_DIR = "output_overlay_system"  # Single output folder for all files
@@ -648,7 +649,10 @@ def create_foot_overlay():
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\\nOverlay visualization saved to: {output_path}")
     
-    plt.show()
+    if ENABLE_INTERACTIVE_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig)  # Close the figure to free memory
     
     # Create a focused overlay for analysis (optional)
     if ENABLE_FOCUSED_OVERLAY:
@@ -677,7 +681,10 @@ def create_foot_overlay():
         plt.savefig(focused_path, dpi=300, bbox_inches='tight')
         print(f"Focused overlay saved to: {focused_path}")
         
-        plt.show()
+        if ENABLE_INTERACTIVE_PLOTS:
+            plt.show()
+        else:
+            plt.close(fig2)  # Close the figure to free memory
     else:
         print("Focused overlay visualization disabled")
     
@@ -721,7 +728,10 @@ def create_foot_overlay():
     plt.savefig(sidebyside_path, dpi=300, bbox_inches='tight')
     print(f"Side-by-side comparison saved to: {sidebyside_path}")
     
-    plt.show()
+    if ENABLE_INTERACTIVE_PLOTS:
+        plt.show()
+    else:
+        plt.close(fig3)  # Close the figure to free memory
     
     print("\\n" + "="*60)
     print("OVERLAY SUMMARY")
