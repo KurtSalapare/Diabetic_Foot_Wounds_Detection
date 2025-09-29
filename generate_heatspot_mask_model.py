@@ -130,35 +130,36 @@ def sample_variant_params(rng_):
 def to_display(img2d):
     return np.where(img2d == 0, np.nan, img2d)
 
-def _normalize_region_name(name: str) -> str:
-    n = (name or "").strip().lower()
-    if n in {"heel", "calcaneus"}:                   return "heel"
-    if n in {"mid", "mid_foot", "midfoot", "arch"}:  return "mid_foot"
-    if n in {"upper", "upper_foot", "upperfoot", "toes", "forefoot"}:
-        return "upper_foot"
-    return "upper_foot"
-
 def _build_full_region_mask(heel, mid, upper, region_key):
+    """Return a full-height mask for exactly one of: 'heel', 'mid_foot', 'upper_foot'."""
     nan_heel = np.full_like(heel, np.nan)
     nan_mid  = np.full_like(mid,  np.nan)
     nan_up   = np.full_like(upper, np.nan)
+
     if region_key == "heel":
-        full = np.vstack((heel, nan_mid, nan_up))
+        return np.vstack((heel, nan_mid, nan_up))
     elif region_key == "mid_foot":
-        full = np.vstack((nan_heel, mid, nan_up))
-    else:  # "upper_foot"
-        full = np.vstack((nan_heel, nan_mid, upper))
-    return full
+        return np.vstack((nan_heel, mid, nan_up))
+    elif region_key == "upper_foot":
+        return np.vstack((nan_heel, nan_mid, upper))
+    else:
+        raise ValueError(
+            f"apply_wound_to must be one of 'heel', 'mid_foot', 'upper_foot' (got: {region_key!r})"
+        )
 
 def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode, rng_):    
     heel, mid_foot, upper_foot = segment_foot(target_foot_img)
     
     h, w = target_foot_img.shape
-    region_key = _normalize_region_name(apply_wound_to)
+
+    region_key = apply_wound_to  # use exactly what caller provided
     region_full = _build_full_region_mask(heel, mid_foot, upper_foot, region_key)
+
     ys, xs = np.where(~np.isnan(region_full))
     if len(xs) == 0:
+        # Fall back to any valid pixel on the target foot image (rare)
         ys, xs = np.where(~np.isnan(target_foot_img))
+
     if position_mode == 1:
         y_center = int(np.mean(ys)); x_center = int(np.mean(xs))
     elif position_mode == 2:
@@ -168,6 +169,7 @@ def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_m
         y_center, x_center = manual_coord
     else:
         raise ValueError("Invalid position_mode")
+
     chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else rng_.choice(["circle", "multi"])
     return y_center, x_center, chosen_shape, h, w, region_full, region_key
 
@@ -330,6 +332,20 @@ def soft_blend_set(base_canvas, target_value, mask_binary, sigma):
     w = np.clip(soft, 0, 1)
     out[valid] = base_canvas[valid] * (1 - w[valid]) + target_value * w[valid]
     return out
+
+def masked_nonzero_mean(canvas, mask):
+    """
+    Mean of values within 'mask' using only pixels that are both non-NaN and non-zero.
+    If the mask has no such pixels, return 0.0 (no global fallback).
+    """
+    m = mask.astype(bool)
+    if not np.any(m):
+        return 0.0
+    sub = canvas[m]
+    valid = (~np.isnan(sub)) & (sub != 0)
+    if np.any(valid):
+        return float(np.mean(sub[valid]))
+    return 0.0
 
 # ---------------------------
 # Feet correction per day
@@ -533,10 +549,8 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
             wounded_canvas = np.array(right_can, copy=True)
             normal_canvas  = left_can
 
-        core_base   = nanmean_safe(normal_canvas[core_mask])
-        inflam_base = nanmean_safe(normal_canvas[inflam_mask])
-        if not np.isfinite(core_base):   core_base   = nanmean_safe(normal_canvas)
-        if not np.isfinite(inflam_base): inflam_base = nanmean_safe(normal_canvas)
+        core_base = masked_nonzero_mean(normal_canvas, core_mask)
+        inflam_base = masked_nonzero_mean(normal_canvas, inflam_mask)
 
         increment = FINAL_INCREMENT_DEG_C * (progress if current_phase == "developing" else 1.0)
         core_target   = core_base   + increment
