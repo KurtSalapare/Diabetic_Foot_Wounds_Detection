@@ -10,6 +10,7 @@
 import os
 import warnings
 import numpy as np
+import random
 import scipy.io
 import matplotlib.pyplot as plt
 from scipy.io.matlab import MatReadWarning
@@ -146,14 +147,9 @@ def _build_full_region_mask(heel, mid, upper, region_key):
             f"apply_wound_to must be one of 'heel', 'mid_foot', 'upper_foot' (got: {region_key!r})"
         )
 
-def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode, rng_):
-    """Pick a wound center strictly inside the requested anatomical region."""
-    if apply_wound_to not in {"heel", "mid_foot", "upper_foot"}:
-        raise ValueError(
-            f"apply_wound_to must be one of 'heel', 'mid_foot', 'upper_foot' (got: {apply_wound_to!r})"
-        )
-
+def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode, rng_):    
     heel, mid_foot, upper_foot = segment_foot(target_foot_img)
+    
     h, w = target_foot_img.shape
 
     region_key = apply_wound_to  # use exactly what caller provided
@@ -167,8 +163,8 @@ def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_m
     if position_mode == 1:
         y_center = int(np.mean(ys)); x_center = int(np.mean(xs))
     elif position_mode == 2:
-        idx = int(rng_.integers(len(ys)))
-        y_center, x_center = int(ys[idx]), int(xs[idx])
+        idx = np.random.randint(len(ys))
+        y_center, x_center = ys[idx], xs[idx]
     elif position_mode == 3:
         y_center, x_center = manual_coord
     else:
@@ -177,44 +173,115 @@ def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_m
     chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else rng_.choice(["circle", "multi"])
     return y_center, x_center, chosen_shape, h, w, region_full, region_key
 
+def make_circle_mask(cx, cy, radius, X, Y):
+    """Helper to create a single circle mask using the 1D ogrid slices X and Y."""
+    return (X - cx)**2 + (Y - cy)**2 <= radius**2
+
 def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_radius_final,
-                     multi_min_blobs, multi_max_blobs, h, w, rng_):
+                     multi_min_blobs, multi_max_blobs, h, w):
     """
     Returns: final_core_mask, final_inflam_mask, blob_count
     - blob_count = 1 for 'circle', or the sampled number of blobs for 'multi'
     """
     Y, X = np.ogrid[:h, :w]
+    final_core_mask, final_inflam_mask, n_blobs = 0, 0, -1
 
     if shape_mode == "circle":
         final_core_mask   = (X - x_center)**2 + (Y - y_center)**2 <= core_radius_final**2
         final_inflam_mask = (X - x_center)**2 + (Y - y_center)**2 <= inflam_radius_final**2
-        return final_core_mask, final_inflam_mask, 1
+        n_blobs = 1
 
     # multi-blob union
-    n_blobs = int(rng_.integers(multi_min_blobs, multi_max_blobs + 1))
-    core_mask_bin = np.zeros((h, w), dtype=bool)
-    inflam_mask_bin = np.zeros((h, w), dtype=bool)
+    # n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
+    else:
+        # Configuration for the constraint
+        n_blobs = np.random.randint((multi_min_blobs, multi_max_blobs + 1))
+        MIN_UNIQUE_PIXELS = 10
+        MAX_ATTEMPTS = 500 # Increased attempts for better chance of finding a spot
+        
+        # Lists to store parameters of successfully placed blobs
+        centers = []
+        core_r_list = []
+        inflam_r_list = []
+        
+        # List of individual core masks (used to calculate cumulative mask)
+        individual_core_masks = []
+        
+        # --- 1. Place the first blob (Unconstrained) ---
+        initial_core_mask = make_circle_mask(x_center, y_center, core_radius_final, X, Y)
+        
+        individual_core_masks.append(initial_core_mask)
+        centers.append((x_center, y_center))
+        core_r_list.append(core_radius_final)
+        inflam_r_list.append(inflam_radius_final)
 
-    centers = [(x_center, y_center)]
-    core_r_list = [core_radius_final]
-    inflam_r_list = [inflam_radius_final]
+        # --- 2. Iterative Placement with Constraint Check ---
+        
+        for i in range(n_blobs - 1):
+            
+            # The cumulative mask is the union of all successfully placed core blobs so far
+            cumulative_core_mask = np.logical_or.reduce(individual_core_masks)
 
-    for _ in range(n_blobs - 1):
-        base_x, base_y = centers[int(rng_.integers(len(centers)))]
-        angle = rng_.uniform(0, 2*np.pi)
-        dist  = int(rng_.integers(max(2, core_radius_final//2), max(3, core_radius_final*2)))
-        dx, dy = int(np.cos(angle) * dist), int(np.sin(angle) * dist)
-        new_x = int(np.clip(base_x + dx, 0, w-1))
-        new_y = int(np.clip(base_y + dy, 0, h-1))
-        centers.append((new_x, new_y))
-        core_r_list.append(int(rng_.integers(max(2, core_radius_final//2), max(3, core_radius_final))))
-        inflam_r_list.append(int(rng_.integers(max(2, inflam_radius_final//2), max(3, inflam_radius_final))))
+            blob_placed = False
+            for attempt in range(MAX_ATTEMPTS):
+                
+                # a. Generate new blob parameters (Position and Radius)
+                # Base the new center on a randomly chosen existing center (clustering)
+                base_x, base_y = random.choice(centers)
+                
+                angle = np.random.uniform(0, 2*np.pi)
+                
+                # Determine distance relative to the core radius
+                min_dist = max(2, core_radius_final // 2)
+                max_dist = max(3, core_radius_final * 2)
+                dist  = np.random.randint(min_dist, max_dist)
+                
+                dx, dy = int(np.cos(angle) * dist), int(np.sin(angle) * dist)
+                
+                # New center, clipped to stay within image boundaries
+                new_x = np.clip(base_x + dx, 0, w - 1)
+                new_y = np.clip(base_y + dy, 0, h - 1)
+                
+                # New radii (randomly generated)
+                new_rc = np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final))
+                new_ri = np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final))
+                
+                # b. Create the mask for the potential new blob
+                new_core_mask = make_circle_mask(new_x, new_y, new_rc, X, Y)
 
-    for (cx, cy), rc, ri in zip(centers, core_r_list, inflam_r_list):
-        core_mask_bin   |= (X - cx)**2 + (Y - cy)**2 <= rc**2
-        inflam_mask_bin |= (X - cx)**2 + (Y - cy)**2 <= ri**2
+                # c. Find the unique area: (New Mask) AND (NOT Cumulative Mask)
+                unique_pixels_mask = new_core_mask & (~cumulative_core_mask)
+                unique_count = np.sum(unique_pixels_mask)
+                
+                # d. Check the constraint (unique pixels >= 5)
+                if unique_count >= MIN_UNIQUE_PIXELS:
+                    
+                    # Constraint met: Add this validated blob and move to the next iteration
+                    individual_core_masks.append(new_core_mask)
+                    centers.append((new_x, new_y))
+                    core_r_list.append(new_rc)
+                    inflam_r_list.append(new_ri)
+                    blob_placed = True
+                    break
+            
+            if not blob_placed:
+                print(f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Constraint may be too strict.")
+        
+        # --- 3. Final Merging ---
+        
+        # The core mask is the union of all validated individual masks
+        final_core_mask = np.logical_or.reduce(individual_core_masks)
+        
+        # The inflammation mask is created using all validated centers/radii 
+        # (It does NOT need the overlap check, it just uses the final parameters)
+        final_inflam_mask = np.zeros((h, w), dtype=bool)
+        for (cx, cy), ri in zip(centers, inflam_r_list):
+            final_inflam_mask |= make_circle_mask(cx, cy, ri, X, Y)
+        
+        n_blobs = len(centers)
+        
+    return final_core_mask, final_inflam_mask, n_blobs
 
-    return core_mask_bin, inflam_mask_bin, n_blobs
 
 def scale_mask(mask, scale_factor, h, w):
     ys, xs = np.where(mask)
@@ -389,7 +456,7 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         shape_mode, x_center, y_center,
         core_r, inflam_r,
         params["multi_min_blobs"], params["multi_max_blobs"],
-        ref_h, ref_w, rng_
+        ref_h, ref_w
     )
     final_core_mask, final_inflam_mask = enforce_region_coverage_cap(
         final_core_mask, final_inflam_mask, region_full, ref_h, ref_w
