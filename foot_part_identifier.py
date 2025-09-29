@@ -135,9 +135,6 @@ def horizontal_split_by_percentage(two_dim_array, percentage):
     
     # Calculate the total height of the foot
     foot_height = last_index - first_index + 1
-    print("Foot Height : " + str(foot_height))
-    print("First : " + str(first_index))
-    print("Last : " + str(last_index))
     
     # Calculate the split row index
     split_row_index = first_index + int(foot_height * percentage)
