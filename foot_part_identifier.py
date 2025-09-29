@@ -128,13 +128,16 @@ def horizontal_split_by_percentage(two_dim_array, percentage):
     last_index = len(two_dim_array) - 1
     first_index = 0
     
-    while np.any(~np.isnan(two_dim_array[first_index])) and first_index != last_index: 
+    while np.all(np.isnan(two_dim_array[first_index])) and (first_index != last_index): 
         first_index+=1
     while np.all(np.isnan(two_dim_array[last_index])) and not(last_index < 0): 
         last_index-=1    
     
     # Calculate the total height of the foot
     foot_height = last_index - first_index + 1
+    print("Foot Height : " + str(foot_height))
+    print("First : " + str(first_index))
+    print("Last : " + str(last_index))
     
     # Calculate the split row index
     split_row_index = first_index + int(foot_height * percentage)
