@@ -10,6 +10,7 @@ AVAILABLE_MAT_FILES = {
     "gz1": "Data/Temp Data/gz1.mat",
     "gz2": "Data/Temp Data/gz2.mat",
     "gz3": "Data/Temp Data/gz3.mat",
+    "gz4": "Data/Temp Data/gz4.mat",
     "gz7": "Data/Temp Data/gz7.mat",
     "gz8": "Data/Temp Data/gz8.mat",
     "gz9": "Data/Temp Data/gz9.mat",
@@ -24,7 +25,7 @@ CMAP = "hot"
 RIGHT_ALPHA = 0.45
 ENABLE_ROTATION_OPTIMIZATION = True
 ROTATION_ANGLE_RANGE = (-30, 30)
-ROTATION_ANGLE_STEP = 1
+ROTATION_ANGLE_STEP = 0.5
 ENABLE_FOCUSED_OVERLAY = False
 MANUAL_INDEX_SELECTION = None
 ENABLE_WARP_OPTIMIZATION = True
@@ -101,7 +102,9 @@ def calculate_overlap_score(mask1, mask2):
 def find_best_rotation_angle(left_foot, right_foot_mirrored):
     left_mask = create_binary_mask(left_foot)
     best_angle, best_score, scores = 0, 0, {}
-    for angle in range(ROTATION_ANGLE_RANGE[0], ROTATION_ANGLE_RANGE[1] + 1, ROTATION_ANGLE_STEP):
+    # Use numpy.arange to handle float step sizes
+    angles = np.arange(ROTATION_ANGLE_RANGE[0], ROTATION_ANGLE_RANGE[1] + ROTATION_ANGLE_STEP, ROTATION_ANGLE_STEP)
+    for angle in angles:
         rotated_right = rotate_image(right_foot_mirrored, angle)
         right_mask = create_binary_mask(rotated_right)
         padded_left, padded_right = pad_to_same_size(left_mask.astype(float), right_mask.astype(float))
@@ -185,7 +188,7 @@ def create_foot_overlay():
         identity_grid = create_grid(*img_left.shape)
 
         # More conservative displacement parameters
-        coarse_h, coarse_w = 3, 3  # Reduced from 4x4 to 3x3 for less aggressive warping
+        coarse_h, coarse_w = 6, 6  # Reduced from 4x4 to 3x3 for less aggressive warping
         displ_coarse = torch.nn.Parameter(torch.zeros(1, coarse_h, coarse_w, 2, device=device))
 
         # More conservative optimization parameters
