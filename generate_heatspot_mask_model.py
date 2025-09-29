@@ -258,6 +258,20 @@ def soft_blend_set(base_canvas, target_value, mask_binary, sigma):
     out[valid] = base_canvas[valid] * (1 - w[valid]) + target_value * w[valid]
     return out
 
+def masked_nonzero_mean(canvas, mask):
+    """
+    Mean of values within 'mask' using only pixels that are both non-NaN and non-zero.
+    If the mask has no such pixels, return 0.0 (no global fallback).
+    """
+    m = mask.astype(bool)
+    if not np.any(m):
+        return 0.0
+    sub = canvas[m]
+    valid = (~np.isnan(sub)) & (sub != 0)
+    if np.any(valid):
+        return float(np.mean(sub[valid]))
+    return 0.0
+
 # ---------------------------
 # Feet correction per day
 # ---------------------------
@@ -460,10 +474,8 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
             wounded_canvas = np.array(right_can, copy=True)
             normal_canvas  = left_can
 
-        core_base   = nanmean_safe(normal_canvas[core_mask])
-        inflam_base = nanmean_safe(normal_canvas[inflam_mask])
-        if not np.isfinite(core_base):   core_base   = nanmean_safe(normal_canvas)
-        if not np.isfinite(inflam_base): inflam_base = nanmean_safe(normal_canvas)
+        core_base = masked_nonzero_mean(normal_canvas, core_mask)
+        inflam_base = masked_nonzero_mean(normal_canvas, inflam_mask)
 
         increment = FINAL_INCREMENT_DEG_C * (progress if current_phase == "developing" else 1.0)
         core_target   = core_base   + increment
