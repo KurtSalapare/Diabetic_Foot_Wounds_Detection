@@ -17,7 +17,7 @@ AVAILABLE_MAT_FILES = {
     "pnt2": "Data/Temp Data/pnt_mat_files/pnt2.mat",
     "pnt3": "Data/Temp Data/pnt_mat_files/pnt3.mat",
 }
-SELECTED_FILE = "gz2"
+SELECTED_FILE = "gz3"
 MAT_FILE = AVAILABLE_MAT_FILES[SELECTED_FILE]
 OUTPUT_DIR = "output_overlay_system"
 CMAP = "hot"
@@ -157,6 +157,14 @@ def create_foot_overlay():
     img_right_scaled = scale_image(img_right_mir, scale_x, scale_y) if img_right_mir.shape != img_left.shape else img_right_mir
 
     if ENABLE_WARP_OPTIMIZATION:
+        print("Starting improved warp optimization with temperature preservation...")
+        
+        # Store original temperature data for preservation
+        original_temps = img_right_scaled[~np.isnan(img_right_scaled)]
+        original_temp_mean = np.mean(original_temps)
+        original_temp_std = np.std(original_temps)
+        print(f"Original temperature stats: mean={original_temp_mean:.2f}°C, std={original_temp_std:.2f}°C")
+        
         # Masks
         mask_left = create_binary_mask(img_left)
         mask_right = create_binary_mask(img_right_scaled)
@@ -176,21 +184,26 @@ def create_foot_overlay():
 
         identity_grid = create_grid(*img_left.shape)
 
-        # Coarse displacement
-        coarse_h, coarse_w = 4, 4
+        # More conservative displacement parameters
+        coarse_h, coarse_w = 3, 3  # Reduced from 4x4 to 3x3 for less aggressive warping
         displ_coarse = torch.nn.Parameter(torch.zeros(1, coarse_h, coarse_w, 2, device=device))
 
-        optimizer = torch.optim.Adam([displ_coarse], lr=0.05)
-        num_iters = 300
+        # More conservative optimization parameters
+        optimizer = torch.optim.Adam([displ_coarse], lr=0.02)  # Reduced learning rate from 0.05
+        num_iters = 150  # Reduced iterations from 300
+
+        best_iou = 0
+        best_displacement = None
 
         for iter in range(num_iters):
             optimizer.zero_grad()
 
+            # More conservative displacement scaling
             displ_full = torch.nn.functional.interpolate(
-                displ_coarse.permute(0, 3, 1, 2), size=img_left.shape, mode='bicubic', align_corners=False
+                displ_coarse.permute(0, 3, 1, 2), size=img_left.shape, mode='bilinear', align_corners=False
             ).permute(0, 2, 3, 1)
 
-            grid = identity_grid + displ_full * 0.2
+            grid = identity_grid + displ_full * 0.1  # Reduced from 0.2 to 0.1 for gentler warping
 
             warped = torch.nn.functional.grid_sample(
                 mask_right_t.unsqueeze(0).unsqueeze(0), grid, mode='bilinear', padding_mode='zeros', align_corners=False
@@ -199,34 +212,48 @@ def create_foot_overlay():
             inter = torch.sum(warped * mask_left_t)
             union = torch.sum(warped + mask_left_t - warped * mask_left_t) + 1e-6
             iou = inter / union
-            loss = -iou
+            
+            # Add regularization to prevent extreme deformations
+            displacement_magnitude = torch.mean(torch.sum(displ_full ** 2, dim=-1))
+            smoothness_loss = torch.mean(torch.abs(displ_full[:, 1:, :, :] - displ_full[:, :-1, :, :])) + \
+                             torch.mean(torch.abs(displ_full[:, :, 1:, :] - displ_full[:, :, :-1, :]))
+            
+            loss = -iou + 0.1 * displacement_magnitude + 0.05 * smoothness_loss
 
             loss.backward()
             optimizer.step()
+            
+            # Track best solution
+            if iou.item() > best_iou:
+                best_iou = iou.item()
+                best_displacement = displ_full.clone().detach()
 
-            if iter % 50 == 0:
-                print(f"Iter {iter}: IOU {iou.item():.4f}")
+            if iter % 30 == 0:  # Reduced logging frequency
+                print(f"Iter {iter}: IOU {iou.item():.4f}, Displacement {displacement_magnitude.item():.4f}")
 
-        # Final warp for image
-        displ_full = torch.nn.functional.interpolate(
-            displ_coarse.permute(0, 3, 1, 2), size=img_left.shape, mode='bicubic', align_corners=False
-        ).permute(0, 2, 3, 1)
-        grid = identity_grid + displ_full * 0.2
+        # Use best displacement for final warping
+        grid = identity_grid + best_displacement * 0.1
 
-        img_right_t = torch.from_numpy(img_right_scaled).float().to(device)  # Convert to float32
-        fill_value = -100.0
+        # Apply warping to temperature data with better preservation
+        img_right_t = torch.from_numpy(img_right_scaled).float().to(device)
+        
+        # Create a more conservative fill value based on actual data
+        fill_value = float(np.nanmin(img_right_scaled)) - 5.0 if not np.isnan(np.nanmin(img_right_scaled)) else 15.0
+        
         img_right_filled = torch.where(
             torch.isnan(img_right_t), torch.tensor(fill_value, dtype=torch.float32, device=device), img_right_t
         )
         valid_mask_t = (~torch.isnan(img_right_t)).float().to(device)
 
+        # Use nearest neighbor to preserve exact temperature values
         warped_temp = torch.nn.functional.grid_sample(
             img_right_filled.unsqueeze(0).unsqueeze(0),
             grid,
-            mode='nearest',
-            padding_mode='zeros',
+            mode='nearest',  # Keep nearest neighbor for temperature preservation
+            padding_mode='border',  # Use border padding instead of zeros
             align_corners=False
         ).squeeze()
+        
         warped_valid = torch.nn.functional.grid_sample(
             valid_mask_t.unsqueeze(0).unsqueeze(0),
             grid,
@@ -236,11 +263,25 @@ def create_foot_overlay():
         ).squeeze()
 
         img_right_scaled = torch.where(
-        warped_valid > 0.5, warped_temp, torch.tensor(np.nan, dtype=torch.float32, device=device)
-        ).detach().cpu().numpy()  # Add .detach() before .cpu().numpy()
+            warped_valid > 0.5, warped_temp, torch.tensor(np.nan, dtype=torch.float32, device=device)
+        ).detach().cpu().numpy()
+
+        # Validate temperature preservation
+        final_temps = img_right_scaled[~np.isnan(img_right_scaled)]
+        if len(final_temps) > 0:
+            final_temp_mean = np.mean(final_temps)
+            final_temp_std = np.std(final_temps)
+            temp_drift = abs(final_temp_mean - original_temp_mean)
+            print(f"Final temperature stats: mean={final_temp_mean:.2f}°C, std={final_temp_std:.2f}°C")
+            print(f"Temperature drift: {temp_drift:.2f}°C")
+            
+            if temp_drift > 1.0:  # If temperature drifted too much, warn user
+                print("⚠️  Warning: Significant temperature drift detected after warping")
 
         # Update overlap score
         overlap_score = calculate_overlap_score(create_binary_mask(img_left), create_binary_mask(img_right_scaled))
+        print(f"Final overlap score: {overlap_score:.4f}")
+        print("Warp optimization completed with improved temperature preservation.")
     left_canvas, right_canvas = pad_to_same_size(img_left, img_right_scaled)
     
     # Visualizations
