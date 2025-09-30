@@ -10,6 +10,7 @@
 import os
 import warnings
 import numpy as np
+import random
 import scipy.io
 import matplotlib.pyplot as plt
 from scipy.io.matlab import MatReadWarning
@@ -100,21 +101,25 @@ CENTER_DOT_SIZE = 36  # tweak if you want it bigger/smaller
 
 
 # --------------------------------------------
-# Variant param sampling — now uses np.random.*
+# Randomization helpers (per-variant diversity)
 # --------------------------------------------
-def sample_variant_params():
+def rng(seed=None):
+    return np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+
+
+def sample_variant_params(rng_):
     # Radii are chosen later (relative policy) after we know canvas/region.
     params = {
-        "apply_to": np.random.choice(["left", "right"]),
-        "apply_wound_to": np.random.choice(["heel", "upper_foot", "mid_foot"]),
+        "apply_to": rng_.choice(["left", "right"]),
+        "apply_wound_to": rng_.choice(["heel", "upper_foot", "mid_foot"]),
         "position_mode": 2,  # random in region
         "manual_coord": (150, 180),
-        "shape_mode": np.random.choice(["circle", "multi"]),
+        "shape_mode": rng_.choice(["circle", "multi"]),
         # Legacy placeholders; used only if SIZE_POLICY="absolute"
-        "core_radius_final": int(np.random.randint(ABS_CORE_RADIUS_RANGE[0], ABS_CORE_RADIUS_RANGE[1])),
-        "inflam_radius_final": int(np.random.randint(ABS_INFLAM_RADIUS_RANGE[0], ABS_INFLAM_RADIUS_RANGE[1])),
-        "blur_sigma_core": float(np.random.uniform(5.0, 7.0)),
-        "blur_sigma_inflam": float(np.random.uniform(5.0, 7.0)),
+        "core_radius_final": int(rng_.integers(*ABS_CORE_RADIUS_RANGE)),
+        "inflam_radius_final": int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE)),
+        "blur_sigma_core": float(rng_.uniform(5.0, 7.0)),
+        "blur_sigma_inflam": float(rng_.uniform(5.0, 7.0)),
         "multi_min_blobs": 2,
         "multi_max_blobs": 6,
         "develop_mode": DEVELOP_MODE,
@@ -149,7 +154,7 @@ def _build_full_region_mask(heel, mid, upper, region_key):
         )
 
 
-def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode):
+def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode, rng_):
     heel, mid_foot, upper_foot = segment_foot(target_foot_img)
 
     h, w = target_foot_img.shape
@@ -167,13 +172,13 @@ def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_m
         x_center = int(np.mean(xs))
     elif position_mode == 2:
         idx = np.random.randint(len(ys))
-        y_center, x_center = int(ys[idx]), int(xs[idx])
+        y_center, x_center = ys[idx], xs[idx]
     elif position_mode == 3:
         y_center, x_center = manual_coord
     else:
         raise ValueError("Invalid position_mode")
 
-    chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else np.random.choice(["circle", "multi"])
+    chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else rng_.choice(["circle", "multi"])
     return y_center, x_center, chosen_shape, h, w, region_full, region_key
 
 
@@ -196,9 +201,11 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
         final_inflam_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= inflam_radius_final ** 2
         n_blobs = 1
 
+    # multi-blob union
+    # n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
     else:
         # Configuration for the constraint
-        n_blobs = int(np.random.randint(multi_min_blobs, multi_max_blobs + 1))
+        n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
         MIN_UNIQUE_PIXELS = 10
         MAX_ATTEMPTS = 500  # Increased attempts for better chance of finding a spot
 
@@ -219,41 +226,44 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
         inflam_r_list.append(inflam_radius_final)
 
         # --- 2. Iterative Placement with Constraint Check ---
+
         for i in range(n_blobs - 1):
+
             # The cumulative mask is the union of all successfully placed core blobs so far
             cumulative_core_mask = np.logical_or.reduce(individual_core_masks)
 
             blob_placed = False
             for attempt in range(MAX_ATTEMPTS):
+
                 # a. Generate new blob parameters (Position and Radius)
                 # Base the new center on a randomly chosen existing center (clustering)
-                base_x, base_y = centers[int(np.random.randint(0, len(centers)))]
+                base_x, base_y = random.choice(centers)
 
-                angle = float(np.random.uniform(0, 2 * np.pi))
+                angle = np.random.uniform(0, 2 * np.pi)
 
                 # Determine distance relative to the core radius
                 min_dist = max(2, core_radius_final // 2)
                 max_dist = max(3, core_radius_final * 2)
-                dist = int(np.random.randint(min_dist, max_dist))
+                dist = np.random.randint(min_dist, max_dist)
 
                 dx, dy = int(np.cos(angle) * dist), int(np.sin(angle) * dist)
 
                 # New center, clipped to stay within image boundaries
-                new_x = int(np.clip(base_x + dx, 0, w - 1))
-                new_y = int(np.clip(base_y + dy, 0, h - 1))
+                new_x = np.clip(base_x + dx, 0, w - 1)
+                new_y = np.clip(base_y + dy, 0, h - 1)
 
                 # New radii (randomly generated)
-                new_rc = int(np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final)))
-                new_ri = int(np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final)))
+                new_rc = np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final))
+                new_ri = np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final))
 
                 # b. Create the mask for the potential new blob
                 new_core_mask = make_circle_mask(new_x, new_y, new_rc, X, Y)
 
                 # c. Find the unique area: (New Mask) AND (NOT Cumulative Mask)
                 unique_pixels_mask = new_core_mask & (~cumulative_core_mask)
-                unique_count = int(np.sum(unique_pixels_mask))
+                unique_count = np.sum(unique_pixels_mask)
 
-                # d. Check the constraint (unique pixels >= 10)
+                # d. Check the constraint (unique pixels >= 5)
                 if unique_count >= MIN_UNIQUE_PIXELS:
                     # Constraint met: Add this validated blob and move to the next iteration
                     individual_core_masks.append(new_core_mask)
@@ -268,10 +278,12 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
                     f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Constraint may be too strict.")
 
         # --- 3. Final Merging ---
+
         # The core mask is the union of all validated individual masks
         final_core_mask = np.logical_or.reduce(individual_core_masks)
 
-        # The inflammation mask uses all validated centers/radii
+        # The inflammation mask is created using all validated centers/radii
+        # (It does NOT need the overlap check, it just uses the final parameters)
         final_inflam_mask = np.zeros((h, w), dtype=bool)
         for (cx, cy), ri in zip(centers, inflam_r_list):
             final_inflam_mask |= make_circle_mask(cx, cy, ri, X, Y)
@@ -388,16 +400,16 @@ def center_pad_to(img, target_h, target_w):
 
 
 # ---- Radii selection & caps ----
-def pick_final_radii(h, w, region_full, params):
+def pick_final_radii(h, w, region_full, rng_, params):
     if SIZE_POLICY == "relative":
         min_dim = float(min(h, w))
-        core_frac = float(np.random.uniform(CORE_RADIUS_FRAC_RANGE[0], CORE_RADIUS_FRAC_RANGE[1]))
+        core_frac = rng_.uniform(*CORE_RADIUS_FRAC_RANGE)
         core_r = int(max(2, round(min_dim * core_frac)))
-        ratio = float(np.random.uniform(INFLAM_OVER_CORE_RATIO[0], INFLAM_OVER_CORE_RATIO[1]))
+        ratio = rng_.uniform(*INFLAM_OVER_CORE_RATIO)
         inflam_r = int(max(core_r + 1, round(core_r * ratio)))
     else:
-        core_r = int(np.random.randint(ABS_CORE_RADIUS_RANGE[0], ABS_CORE_RADIUS_RANGE[1]))
-        inflam_r = int(np.random.randint(ABS_INFLAM_RADIUS_RANGE[0], ABS_INFLAM_RADIUS_RANGE[1]))
+        core_r = int(rng_.integers(*ABS_CORE_RADIUS_RANGE))
+        inflam_r = int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE))
         inflam_r = max(inflam_r, core_r + 1)
     return core_r, inflam_r
 
@@ -440,11 +452,8 @@ def compute_timeline(mode, dev_days, static_days):
 # ==========================
 def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode, dev_days, static_days, out_root,
                             seed=None):
-    # Optional per-variant seeding (affects global np.random for reproducibility)
-    if seed is not None:
-        np.random.seed(int(seed))
-
-    params = sample_variant_params()
+    rng_ = rng(seed)
+    params = sample_variant_params(rng_)
     params.update(base_params)
     params["generation_mode"] = mode
 
@@ -461,11 +470,11 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
     (y_center, x_center, shape_mode, _, _, region_full, region_key
      ) = select_center_and_shape_on_image(
         target_img, params["apply_wound_to"], params["position_mode"],
-        params["manual_coord"], params["shape_mode"]
+        params["manual_coord"], params["shape_mode"], rng_
     )
 
     # ---- Radii (relative) & coverage caps ----
-    core_r, inflam_r = pick_final_radii(ref_h, ref_w, region_full, params)
+    core_r, inflam_r = pick_final_radii(ref_h, ref_w, region_full, rng_, params)
     final_core_mask, final_inflam_mask, blob_count = build_final_mask(
         shape_mode, x_center, y_center,
         core_r, inflam_r,
