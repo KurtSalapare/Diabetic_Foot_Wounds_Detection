@@ -18,11 +18,20 @@ from scipy.ndimage import gaussian_filter
 from skimage.transform import rescale
 
 from foot_part_identifier import segment_foot
-from foot_overlay_creator import (
+# OLD
+# from foot_overlay_creator import (
+#     to_nan, trim_to_content, mirror_horiz, pad_to_same_size,
+#     rotate_image_preserve_temps, find_best_rotation_angle,
+#     scale_image_preserve_temps
+# )
+
+# NEW
+from foot_overlay_creator_simplified2 import (
     to_nan, trim_to_content, mirror_horiz, pad_to_same_size,
-    rotate_image_preserve_temps, find_best_rotation_angle,
-    scale_image_preserve_temps
+    rotate_image, find_best_rotation_angle, scale_image, create_binary_mask
 )
+import torch
+
 
 warnings.filterwarnings("ignore", category=MatReadWarning)
 
@@ -47,7 +56,7 @@ def _silence_imported(enabled=True):
 # HIGH-LEVEL DATASET CONFIG
 # ==========================
 RUN_ALL_PATIENTS = False
-SINGLE_PATIENT_ID = "gz1"
+SINGLE_PATIENT_ID = "gz7"
 PATIENT_PREFIX = "gz"
 PATIENT_COUNT = 15
 MAT_ROOT = "Data/Temp Data"
@@ -363,33 +372,6 @@ def masked_nonzero_mean(canvas, mask):
         return float(np.mean(sub[valid]))
     return 0.0
 
-
-# ---------------------------
-# Feet correction per day
-# ---------------------------
-def correct_align_feet_for_day(scan_left, scan_right):
-    with _silence_imported(SUPPRESS_IMPORTED_LOGS):
-        img_left = trim_to_content(to_nan(scan_left, adaptive_threshold=True))
-        img_right = trim_to_content(to_nan(scan_right, adaptive_threshold=True))
-        img_right_mir = mirror_horiz(img_right)
-        angle, score, _scores = find_best_rotation_angle(img_left, img_right_mir)
-        if angle != 0:
-            img_right_mir = rotate_image_preserve_temps(img_right_mir, angle)
-        if img_right_mir.shape != img_left.shape:
-            scale_x = img_left.shape[1] / img_right_mir.shape[1]
-            scale_y = img_left.shape[0] / img_right_mir.shape[0]
-            img_right_scaled = scale_image_preserve_temps(img_right_mir, scale_x, scale_y)
-        else:
-            img_right_scaled = img_right_mir
-            scale_x = scale_y = 1.0
-        left_canvas, right_canvas = pad_to_same_size(img_left, img_right_scaled)
-
-    info = {"rotation_angle": float(angle), "overlap_score": float(score),
-            "scale_x": float(scale_x), "scale_y": float(scale_y),
-            "canvas_shape": left_canvas.shape}
-    return left_canvas, right_canvas, info
-
-
 def center_pad_to(img, target_h, target_w):
     h, w = img.shape
     canvas = np.full((target_h, target_w), np.nan, dtype=float)
@@ -398,6 +380,173 @@ def center_pad_to(img, target_h, target_w):
     canvas[top:top + h, left:left + w] = img
     return canvas
 
+# ---------------------------
+# Patient-level foot correction (compute once) + per-day application
+# ---------------------------
+
+def _create_grid(h, w, device):
+    y = torch.linspace(-1, 1, h, device=device)
+    x = torch.linspace(-1, 1, w, device=device)
+    yy, xx = torch.meshgrid(y, x, indexing='ij')
+    return torch.stack([xx, yy], dim=-1).unsqueeze(0)  # [1, h, w, 2]
+
+def _optimize_displacement(mask_left_np, mask_right_np, device, iters=150, lr=0.02, disp_scale=0.1):
+    """Find coarse displacement that maximizes IoU between left and right masks (mirrored/rot+scaled already)."""
+    mask_left_t  = torch.from_numpy(mask_left_np).float().to(device)
+    mask_right_t = torch.from_numpy(mask_right_np).float().to(device)
+    H, W = mask_left_t.shape
+
+    identity_grid = _create_grid(H, W, device)
+    # 3x3 coarse control points, bilinear-upsampled to full grid
+    displ_coarse = torch.nn.Parameter(torch.zeros(1, 3, 3, 2, device=device))
+    opt = torch.optim.Adam([displ_coarse], lr=lr)
+
+    best_iou, best_displ = 0.0, None
+    for _ in range(iters):
+        opt.zero_grad()
+        displ_full = torch.nn.functional.interpolate(
+            displ_coarse.permute(0, 3, 1, 2), size=(H, W), mode='bilinear', align_corners=False
+        ).permute(0, 2, 3, 1)
+        grid = identity_grid + displ_full * disp_scale
+
+        warped = torch.nn.functional.grid_sample(
+            mask_right_t[None, None, ...], grid, mode='bilinear',
+            padding_mode='zeros', align_corners=False
+        ).squeeze()
+
+        inter = torch.sum(warped * mask_left_t)
+        union = torch.sum(warped + mask_left_t - warped * mask_left_t) + 1e-6
+        iou = inter / union
+
+        # simple regularization to keep displacement gentle/smooth
+        disp_mag = torch.mean(torch.sum(displ_full ** 2, dim=-1))
+        smooth = torch.mean(torch.abs(displ_full[:, 1:, :, :] - displ_full[:, :-1, :, :])) + \
+                 torch.mean(torch.abs(displ_full[:, :, 1:, :] - displ_full[:, :, :-1, :]))
+
+        loss = -iou + 0.1 * disp_mag + 0.05 * smooth
+        loss.backward()
+        opt.step()
+
+        if iou.item() > best_iou:
+            best_iou = iou.item()
+            best_displ = displ_full.detach()
+
+    # Final grid used everywhere for this patient
+    final_grid = _create_grid(H, W, device) + best_displ * 0.1
+    return final_grid  # [1,H,W,2] on device
+
+
+def compute_patient_transform(left_crop, right_crop):
+    """
+    Compute mirror+rotation+scale+warp ONCE using day-0 scans.
+    Returns:
+      ref_left (H,W), ref_right (H,W), tf (dict with angle, scale, grid, ref_shape, fill_value)
+    """
+    # day-0 preprocessing
+    left0  = trim_to_content(to_nan(left_crop[0, 0],  adaptive_threshold=True))
+    right0 = trim_to_content(to_nan(right_crop[0, 0], adaptive_threshold=True))
+    right0_m = mirror_horiz(right0)
+
+    # rotation search (right mirrored vs left)
+    angle, _score, _ = find_best_rotation_angle(left0, right0_m)
+    if angle != 0:
+        right0_m = trim_to_content(rotate_image(right0_m, angle))
+
+    # scale right to left's size
+    sx = left0.shape[1] / right0_m.shape[1] if right0_m.shape[1] else 1.0
+    sy = left0.shape[0] / right0_m.shape[0] if right0_m.shape[0] else 1.0
+    right0_s = scale_image(right0_m, sx, sy) if right0_m.shape != left0.shape else right0_m
+
+    # build masks & optimize small warp to improve overlap (torch)
+    mask_left  = create_binary_mask(left0)
+    mask_right = create_binary_mask(right0_s)
+    device = torch.device('cpu')
+    grid = _optimize_displacement(mask_left.astype(float), mask_right.astype(float), device=device)
+
+    # apply warp to temperature data (nearest to preserve temps)
+    img_right_t = torch.from_numpy(right0_s).float().to(device)
+    fill_value = float(np.nanmin(right0_s)) - 5.0 if not np.isnan(np.nanmin(right0_s)) else 15.0
+    img_right_filled = torch.where(torch.isnan(img_right_t),
+                                   torch.tensor(fill_value, dtype=torch.float32, device=device),
+                                   img_right_t)
+    valid_mask_t = (~torch.isnan(img_right_t)).float()
+
+    warped_temp = torch.nn.functional.grid_sample(
+        img_right_filled[None, None, ...], grid, mode='nearest',
+        padding_mode='border', align_corners=False
+    ).squeeze()
+    warped_valid = torch.nn.functional.grid_sample(
+        valid_mask_t[None, None, ...], grid, mode='nearest',
+        padding_mode='zeros', align_corners=False
+    ).squeeze()
+
+    right0_warp = torch.where(warped_valid > 0.5, warped_temp,
+                              torch.tensor(np.nan, dtype=torch.float32)).cpu().numpy()
+
+    # pad to identical canvas (usually already equal)
+    ref_left, ref_right = pad_to_same_size(left0, right0_warp)
+    tf = {
+        "angle": float(angle),
+        "scale_x": float(sx),
+        "scale_y": float(sy),
+        "grid": grid,                  # torch tensor on CPU
+        "ref_shape": ref_left.shape,   # (H,W)
+        "fill_value": float(fill_value)
+    }
+    return ref_left, ref_right, tf
+
+
+def apply_patient_transform(scan_left, scan_right, tf):
+    """
+    Apply the precomputed transform to any day.
+    Outputs left_canvas, right_canvas, info (angle/scale/shape).
+    """
+    left  = trim_to_content(to_nan(scan_left,  adaptive_threshold=True))
+    right = trim_to_content(to_nan(scan_right, adaptive_threshold=True))
+    right_m = mirror_horiz(right)
+
+    # rotate & scale with patient-level params
+    if tf["angle"] != 0.0:
+        right_m = trim_to_content(rotate_image(right_m, tf["angle"]))
+
+    if right_m.shape != (int(round(right_m.shape[0] * tf["scale_y"])),
+                         int(round(right_m.shape[1] * tf["scale_x"]))):
+        right_s = scale_image(right_m, tf["scale_x"], tf["scale_y"])
+    else:
+        right_s = right_m
+
+    # warp to reference frame
+    device = torch.device('cpu')
+    H, W = tf["ref_shape"]
+    grid = tf["grid"]  # already sized [1,H,W,2]
+    img_right_t = torch.from_numpy(right_s).float().to(device)
+    img_right_filled = torch.where(torch.isnan(img_right_t),
+                                   torch.tensor(tf["fill_value"], dtype=torch.float32, device=device),
+                                   img_right_t)
+    valid_mask_t = (~torch.isnan(img_right_t)).float()
+
+    warped_temp = torch.nn.functional.grid_sample(
+        img_right_filled[None, None, ...], grid, mode='nearest',
+        padding_mode='border', align_corners=False
+    ).squeeze()
+    warped_valid = torch.nn.functional.grid_sample(
+        valid_mask_t[None, None, ...], grid, mode='nearest',
+        padding_mode='zeros', align_corners=False
+    ).squeeze()
+    right_w = torch.where(warped_valid > 0.5, warped_temp,
+                          torch.tensor(np.nan, dtype=torch.float32)).cpu().numpy()
+
+    # center-pad both to reference canvas
+    left_can  = center_pad_to(left,  H, W) if left.shape  != (H, W) else left
+    right_can = center_pad_to(right_w, H, W) if right_w.shape != (H, W) else right_w
+
+    info = {
+        "rotation_angle": tf["angle"],
+        "scale_x": tf["scale_x"],
+        "scale_y": tf["scale_y"],
+        "canvas_shape": (H, W)
+    }
+    return left_can, right_can, info
 
 # ---- Radii selection & caps ----
 def pick_final_radii(h, w, region_full, rng_, params):
@@ -463,7 +612,12 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
     num_src_days = left_crop.shape[0]
 
     # ---- Reference corrected canvases + choose center/shape on Day 0 ----
-    ref_left, ref_right, info0 = correct_align_feet_for_day(left_crop[0, 0], right_crop[0, 0])
+    # OLD
+    # ref_left, ref_right, info0 = correct_align_feet_for_day(left_crop[0, 0], right_crop[0, 0])
+    # ref_h, ref_w = ref_left.shape
+
+    # NEW
+    ref_left, ref_right, tf = compute_patient_transform(left_crop, right_crop)
     ref_h, ref_w = ref_left.shape
 
     target_img = ref_left if params["apply_to"] == "left" else ref_right
@@ -524,7 +678,17 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         "initial_size_scale": float(params["initial_size_scale"]),
         "initial_temp_scale": float(params["initial_temp_scale"]),
         "ref_canvas_shape": (int(ref_h), int(ref_w)),
-        "foot_correction_info_day0": info0,
+        # OLD in meta:
+        # "foot_correction_info_day0": info0,
+
+        # NEW:
+        "foot_correction_info_patient": {
+            "rotation_angle": tf["angle"],
+            "scale_x": tf["scale_x"],
+            "scale_y": tf["scale_y"],
+            "canvas_shape": tf["ref_shape"]
+        },
+
         "size_policy": SIZE_POLICY,
         "coverage_caps": {
             "max_inflam_region_coverage": MAX_INFLAM_REGION_COVERAGE,
@@ -548,10 +712,16 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
     for i in range(total_days):
         src_day = i % num_src_days
 
-        left_can, right_can, info_day = correct_align_feet_for_day(left_crop[src_day, 0], right_crop[src_day, 0])
-        if left_can.shape != (ref_h, ref_w):
-            left_can = center_pad_to(left_can, ref_h, ref_w)
-            right_can = center_pad_to(right_can, ref_h, ref_w)
+        # OLD
+        # left_can, right_can, info_day = correct_align_feet_for_day(left_crop[src_day, 0], right_crop[src_day, 0])
+        # if left_can.shape != (ref_h, ref_w):
+        #     left_can = center_pad_to(left_can, ref_h, ref_w)
+        #     right_can = center_pad_to(right_can, ref_h, ref_w)
+
+        # NEW
+        left_can, right_can, info_day = apply_patient_transform(
+            left_crop[src_day, 0], right_crop[src_day, 0], tf
+        )
 
         if mode == "both":
             current_phase = "developing" if i < dev_days else "static"
@@ -597,7 +767,7 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         im = ax.imshow(combined, cmap=CMAP)
         ax.axis("off")
         title = (
-            f"{patient_id} • Var {variant_idx:02d} • Day {i + 1:02d} (src {src_day + 1:02d}) — {current_phase}\n"
+            f"{patient_id} • Var {variant_idx:02d} • Day {i + 1:02d} (src {src_day + 1:02d}) - {current_phase}\n"
             f"{params['apply_to']} / {region_key} | "
             f"core_base={core_base:.2f}°C→{core_target:.2f}°C, "
             f"inflam_base={inflam_base:.2f}°C→{inflam_target:.2f}°C, "
