@@ -10,7 +10,6 @@
 import os
 import warnings
 import numpy as np
-import random
 import scipy.io
 import matplotlib.pyplot as plt
 from scipy.io.matlab import MatReadWarning
@@ -32,6 +31,7 @@ SUPPRESS_IMPORTED_LOGS = True
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 import sys, io, os
 
+
 @contextmanager
 def _silence_imported(enabled=True):
     if not enabled:
@@ -41,13 +41,14 @@ def _silence_imported(enabled=True):
         with redirect_stdout(devnull), redirect_stderr(devnull):
             yield
 
+
 # ==========================
 # HIGH-LEVEL DATASET CONFIG
 # ==========================
 RUN_ALL_PATIENTS = False
 SINGLE_PATIENT_ID = "gz1"
 PATIENT_PREFIX = "gz"
-PATIENT_COUNT  = 15
+PATIENT_COUNT = 15
 MAT_ROOT = "Data/Temp Data"
 
 WOUND_VARIANTS_PER_PATIENT = 3
@@ -61,26 +62,26 @@ LOG_VARIANT_ASSIGNMENTS = True
 # ==========================
 # GENERATION/GROWTH CONFIG
 # ==========================
-GENERATION_MODE = "both"   # "static", "developing", "both"
-DEV_DAYS    = 20
+GENERATION_MODE = "both"  # "static", "developing", "both"
+DEV_DAYS = 20
 STATIC_DAYS = 10
 
-DEVELOP_MODE        = "size+intensity"  # "size+intensity" | "intensity-only"
-INITIAL_SIZE_SCALE  = 0.05
-INITIAL_TEMP_SCALE  = 0.05  # kept for compatibility (not used by new temp evolution)
+DEVELOP_MODE = "size+intensity"  # "size+intensity" | "intensity-only"
+INITIAL_SIZE_SCALE = 0.05
+INITIAL_TEMP_SCALE = 0.05  # kept for compatibility (not used by new temp evolution)
 
 # ---- Relative size policy (prevents huge wounds on padded canvases) ----
-SIZE_POLICY = "relative"    # "relative" (recommended) | "absolute"
+SIZE_POLICY = "relative"  # "relative" (recommended) | "absolute"
 
 # Relative sizing (fractions of min(ref_h, ref_w))
-CORE_RADIUS_FRAC_RANGE = (0.025, 0.040)     # ~2.5%..4.0% of min dimension
-INFLAM_OVER_CORE_RATIO = (1.6, 2.2)         # inflam radius = core * ratio
+CORE_RADIUS_FRAC_RANGE = (0.025, 0.040)  # ~2.5%..4.0% of min dimension
+INFLAM_OVER_CORE_RATIO = (1.6, 2.2)  # inflam radius = core * ratio
 # Max final coverage (fraction of target region)
-MAX_INFLAM_REGION_COVERAGE = 0.08           # 8%
-MAX_CORE_REGION_COVERAGE   = 0.03           # 3%
+MAX_INFLAM_REGION_COVERAGE = 0.08  # 8%
+MAX_CORE_REGION_COVERAGE = 0.03  # 3%
 
 # Absolute sizing fallback (narrowed)
-ABS_CORE_RADIUS_RANGE   = (8, 15)
+ABS_CORE_RADIUS_RANGE = (8, 15)
 ABS_INFLAM_RADIUS_RANGE = (16, 28)
 
 # Visualization / formatting
@@ -97,25 +98,23 @@ FINAL_INCREMENT_DEG_C = 3.0  # progresses 0 -> 3.0 °C over DEV_DAYS
 MARK_CENTER_ON_FIRST_DAY = True
 CENTER_DOT_SIZE = 36  # tweak if you want it bigger/smaller
 
-# --------------------------------------------
-# Randomization helpers (per-variant diversity)
-# --------------------------------------------
-def rng(seed=None):
-    return np.random.default_rng(seed) if seed is not None else np.random.default_rng()
 
-def sample_variant_params(rng_):
+# --------------------------------------------
+# Variant param sampling — now uses np.random.*
+# --------------------------------------------
+def sample_variant_params():
     # Radii are chosen later (relative policy) after we know canvas/region.
     params = {
-        "apply_to": rng_.choice(["left", "right"]),
-        "apply_wound_to": rng_.choice(["heel", "upper_foot", "mid_foot"]),
-        "position_mode": 2,                 # random in region
+        "apply_to": np.random.choice(["left", "right"]),
+        "apply_wound_to": np.random.choice(["heel", "upper_foot", "mid_foot"]),
+        "position_mode": 2,  # random in region
         "manual_coord": (150, 180),
-        "shape_mode": rng_.choice(["circle", "multi"]),
+        "shape_mode": np.random.choice(["circle", "multi"]),
         # Legacy placeholders; used only if SIZE_POLICY="absolute"
-        "core_radius_final": int(rng_.integers(*ABS_CORE_RADIUS_RANGE)),
-        "inflam_radius_final": int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE)),
-        "blur_sigma_core": float(rng_.uniform(5.0, 7.0)),
-        "blur_sigma_inflam": float(rng_.uniform(5.0, 7.0)),
+        "core_radius_final": int(np.random.randint(ABS_CORE_RADIUS_RANGE[0], ABS_CORE_RADIUS_RANGE[1])),
+        "inflam_radius_final": int(np.random.randint(ABS_INFLAM_RADIUS_RANGE[0], ABS_INFLAM_RADIUS_RANGE[1])),
+        "blur_sigma_core": float(np.random.uniform(5.0, 7.0)),
+        "blur_sigma_inflam": float(np.random.uniform(5.0, 7.0)),
         "multi_min_blobs": 2,
         "multi_max_blobs": 6,
         "develop_mode": DEVELOP_MODE,
@@ -124,17 +123,19 @@ def sample_variant_params(rng_):
     }
     return params
 
+
 # ==========================
 # Helpers
 # ==========================
 def to_display(img2d):
     return np.where(img2d == 0, np.nan, img2d)
 
+
 def _build_full_region_mask(heel, mid, upper, region_key):
     """Return a full-height mask for exactly one of: 'heel', 'mid_foot', 'upper_foot'."""
     nan_heel = np.full_like(heel, np.nan)
-    nan_mid  = np.full_like(mid,  np.nan)
-    nan_up   = np.full_like(upper, np.nan)
+    nan_mid = np.full_like(mid, np.nan)
+    nan_up = np.full_like(upper, np.nan)
 
     if region_key == "heel":
         return np.vstack((heel, nan_mid, nan_up))
@@ -147,9 +148,10 @@ def _build_full_region_mask(heel, mid, upper, region_key):
             f"apply_wound_to must be one of 'heel', 'mid_foot', 'upper_foot' (got: {region_key!r})"
         )
 
-def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode, rng_):    
+
+def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_mode, manual_coord, shape_mode):
     heel, mid_foot, upper_foot = segment_foot(target_foot_img)
-    
+
     h, w = target_foot_img.shape
 
     region_key = apply_wound_to  # use exactly what caller provided
@@ -161,21 +163,24 @@ def select_center_and_shape_on_image(target_foot_img, apply_wound_to, position_m
         ys, xs = np.where(~np.isnan(target_foot_img))
 
     if position_mode == 1:
-        y_center = int(np.mean(ys)); x_center = int(np.mean(xs))
+        y_center = int(np.mean(ys));
+        x_center = int(np.mean(xs))
     elif position_mode == 2:
         idx = np.random.randint(len(ys))
-        y_center, x_center = ys[idx], xs[idx]
+        y_center, x_center = int(ys[idx]), int(xs[idx])
     elif position_mode == 3:
         y_center, x_center = manual_coord
     else:
         raise ValueError("Invalid position_mode")
 
-    chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else rng_.choice(["circle", "multi"])
+    chosen_shape = shape_mode if shape_mode in ["circle", "multi"] else np.random.choice(["circle", "multi"])
     return y_center, x_center, chosen_shape, h, w, region_full, region_key
+
 
 def make_circle_mask(cx, cy, radius, X, Y):
     """Helper to create a single circle mask using the 1D ogrid slices X and Y."""
-    return (X - cx)**2 + (Y - cy)**2 <= radius**2
+    return (X - cx) ** 2 + (Y - cy) ** 2 <= radius ** 2
+
 
 def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_radius_final,
                      multi_min_blobs, multi_max_blobs, h, w):
@@ -187,75 +192,69 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
     final_core_mask, final_inflam_mask, n_blobs = 0, 0, -1
 
     if shape_mode == "circle":
-        final_core_mask   = (X - x_center)**2 + (Y - y_center)**2 <= core_radius_final**2
-        final_inflam_mask = (X - x_center)**2 + (Y - y_center)**2 <= inflam_radius_final**2
+        final_core_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= core_radius_final ** 2
+        final_inflam_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= inflam_radius_final ** 2
         n_blobs = 1
 
-    # multi-blob union
-    # n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
     else:
         # Configuration for the constraint
-        n_blobs = np.random.randint((multi_min_blobs, multi_max_blobs + 1))
+        n_blobs = int(np.random.randint(multi_min_blobs, multi_max_blobs + 1))
         MIN_UNIQUE_PIXELS = 10
-        MAX_ATTEMPTS = 500 # Increased attempts for better chance of finding a spot
-        
+        MAX_ATTEMPTS = 500  # Increased attempts for better chance of finding a spot
+
         # Lists to store parameters of successfully placed blobs
         centers = []
         core_r_list = []
         inflam_r_list = []
-        
+
         # List of individual core masks (used to calculate cumulative mask)
         individual_core_masks = []
-        
+
         # --- 1. Place the first blob (Unconstrained) ---
         initial_core_mask = make_circle_mask(x_center, y_center, core_radius_final, X, Y)
-        
+
         individual_core_masks.append(initial_core_mask)
         centers.append((x_center, y_center))
         core_r_list.append(core_radius_final)
         inflam_r_list.append(inflam_radius_final)
 
         # --- 2. Iterative Placement with Constraint Check ---
-        
         for i in range(n_blobs - 1):
-            
             # The cumulative mask is the union of all successfully placed core blobs so far
             cumulative_core_mask = np.logical_or.reduce(individual_core_masks)
 
             blob_placed = False
             for attempt in range(MAX_ATTEMPTS):
-                
                 # a. Generate new blob parameters (Position and Radius)
                 # Base the new center on a randomly chosen existing center (clustering)
-                base_x, base_y = random.choice(centers)
-                
-                angle = np.random.uniform(0, 2*np.pi)
-                
+                base_x, base_y = centers[int(np.random.randint(0, len(centers)))]
+
+                angle = float(np.random.uniform(0, 2 * np.pi))
+
                 # Determine distance relative to the core radius
                 min_dist = max(2, core_radius_final // 2)
                 max_dist = max(3, core_radius_final * 2)
-                dist  = np.random.randint(min_dist, max_dist)
-                
+                dist = int(np.random.randint(min_dist, max_dist))
+
                 dx, dy = int(np.cos(angle) * dist), int(np.sin(angle) * dist)
-                
+
                 # New center, clipped to stay within image boundaries
-                new_x = np.clip(base_x + dx, 0, w - 1)
-                new_y = np.clip(base_y + dy, 0, h - 1)
-                
+                new_x = int(np.clip(base_x + dx, 0, w - 1))
+                new_y = int(np.clip(base_y + dy, 0, h - 1))
+
                 # New radii (randomly generated)
-                new_rc = np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final))
-                new_ri = np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final))
-                
+                new_rc = int(np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final)))
+                new_ri = int(np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final)))
+
                 # b. Create the mask for the potential new blob
                 new_core_mask = make_circle_mask(new_x, new_y, new_rc, X, Y)
 
                 # c. Find the unique area: (New Mask) AND (NOT Cumulative Mask)
                 unique_pixels_mask = new_core_mask & (~cumulative_core_mask)
-                unique_count = np.sum(unique_pixels_mask)
-                
-                # d. Check the constraint (unique pixels >= 5)
+                unique_count = int(np.sum(unique_pixels_mask))
+
+                # d. Check the constraint (unique pixels >= 10)
                 if unique_count >= MIN_UNIQUE_PIXELS:
-                    
                     # Constraint met: Add this validated blob and move to the next iteration
                     individual_core_masks.append(new_core_mask)
                     centers.append((new_x, new_y))
@@ -263,23 +262,22 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
                     inflam_r_list.append(new_ri)
                     blob_placed = True
                     break
-            
+
             if not blob_placed:
-                print(f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Constraint may be too strict.")
-        
+                print(
+                    f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Constraint may be too strict.")
+
         # --- 3. Final Merging ---
-        
         # The core mask is the union of all validated individual masks
         final_core_mask = np.logical_or.reduce(individual_core_masks)
-        
-        # The inflammation mask is created using all validated centers/radii 
-        # (It does NOT need the overlap check, it just uses the final parameters)
+
+        # The inflammation mask uses all validated centers/radii
         final_inflam_mask = np.zeros((h, w), dtype=bool)
         for (cx, cy), ri in zip(centers, inflam_r_list):
             final_inflam_mask |= make_circle_mask(cx, cy, ri, X, Y)
-        
+
         n_blobs = len(centers)
-        
+
     return final_core_mask, final_inflam_mask, n_blobs
 
 
@@ -288,34 +286,39 @@ def scale_mask(mask, scale_factor, h, w):
     if len(xs) == 0:
         return mask
     cx, cy = np.mean(xs), np.mean(ys)
-    shift_x, shift_y = w//2 - cx, h//2 - cy
+    shift_x, shift_y = w // 2 - cx, h // 2 - cy
     shifted = np.roll(mask, (int(shift_y), int(shift_x)), axis=(0, 1)).astype(float)
     resized = rescale(shifted, scale=scale_factor, preserve_range=True, anti_aliasing=True, order=1)
     rh, rw = resized.shape
     out = np.zeros((h, w), dtype=bool)
-    sy = max((h - rh)//2, 0); sx = max((w - rw)//2, 0)
-    ey = min(h, sy + rh);     ex = min(w, sx + rw)
-    out[sy:ey, sx:ex] = resized[:ey-sy, :ex-sx] > 0.5
+    sy = max((h - rh) // 2, 0);
+    sx = max((w - rw) // 2, 0)
+    ey = min(h, sy + rh);
+    ex = min(w, sx + rw)
+    out[sy:ey, sx:ex] = resized[:ey - sy, :ex - sx] > 0.5
     final = np.roll(out, (-int(shift_y), -int(shift_x)), axis=(0, 1))
     return final
+
 
 def masks_for_progress(progress, final_core_mask, final_inflam_mask, params, h, w):
     if params["develop_mode"] == "size+intensity":
         scale_factor = params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress
-        core_mask   = scale_mask(final_core_mask,   scale_factor, h, w)
+        core_mask = scale_mask(final_core_mask, scale_factor, h, w)
         inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
     elif params["develop_mode"] == "intensity-only":
-        core_mask   = final_core_mask
+        core_mask = final_core_mask
         inflam_mask = final_inflam_mask
     else:
         raise ValueError("Unknown develop_mode")
     return core_mask, inflam_mask
+
 
 def nanmean_safe(arr):
     vals = arr[~np.isnan(arr)]
     if vals.size == 0:
         return np.nan
     return float(np.mean(vals))
+
 
 def soft_blend_set(base_canvas, target_value, mask_binary, sigma):
     if mask_binary.dtype != float:
@@ -333,6 +336,7 @@ def soft_blend_set(base_canvas, target_value, mask_binary, sigma):
     out[valid] = base_canvas[valid] * (1 - w[valid]) + target_value * w[valid]
     return out
 
+
 def masked_nonzero_mean(canvas, mask):
     """
     Mean of values within 'mask' using only pixels that are both non-NaN and non-zero.
@@ -347,12 +351,13 @@ def masked_nonzero_mean(canvas, mask):
         return float(np.mean(sub[valid]))
     return 0.0
 
+
 # ---------------------------
 # Feet correction per day
 # ---------------------------
 def correct_align_feet_for_day(scan_left, scan_right):
     with _silence_imported(SUPPRESS_IMPORTED_LOGS):
-        img_left  = trim_to_content(to_nan(scan_left,  adaptive_threshold=True))
+        img_left = trim_to_content(to_nan(scan_left, adaptive_threshold=True))
         img_right = trim_to_content(to_nan(scan_right, adaptive_threshold=True))
         img_right_mir = mirror_horiz(img_right)
         angle, score, _scores = find_best_rotation_angle(img_left, img_right_mir)
@@ -372,36 +377,39 @@ def correct_align_feet_for_day(scan_left, scan_right):
             "canvas_shape": left_canvas.shape}
     return left_canvas, right_canvas, info
 
+
 def center_pad_to(img, target_h, target_w):
     h, w = img.shape
     canvas = np.full((target_h, target_w), np.nan, dtype=float)
     top = max(0, (target_h - h) // 2)
     left = max(0, (target_w - w) // 2)
-    canvas[top:top+h, left:left+w] = img
+    canvas[top:top + h, left:left + w] = img
     return canvas
 
+
 # ---- Radii selection & caps ----
-def pick_final_radii(h, w, region_full, rng_, params):
+def pick_final_radii(h, w, region_full, params):
     if SIZE_POLICY == "relative":
         min_dim = float(min(h, w))
-        core_frac = rng_.uniform(*CORE_RADIUS_FRAC_RANGE)
+        core_frac = float(np.random.uniform(CORE_RADIUS_FRAC_RANGE[0], CORE_RADIUS_FRAC_RANGE[1]))
         core_r = int(max(2, round(min_dim * core_frac)))
-        ratio = rng_.uniform(*INFLAM_OVER_CORE_RATIO)
+        ratio = float(np.random.uniform(INFLAM_OVER_CORE_RATIO[0], INFLAM_OVER_CORE_RATIO[1]))
         inflam_r = int(max(core_r + 1, round(core_r * ratio)))
     else:
-        core_r   = int(rng_.integers(*ABS_CORE_RADIUS_RANGE))
-        inflam_r = int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE))
+        core_r = int(np.random.randint(ABS_CORE_RADIUS_RANGE[0], ABS_CORE_RADIUS_RANGE[1]))
+        inflam_r = int(np.random.randint(ABS_INFLAM_RADIUS_RANGE[0], ABS_INFLAM_RADIUS_RANGE[1]))
         inflam_r = max(inflam_r, core_r + 1)
     return core_r, inflam_r
+
 
 def enforce_region_coverage_cap(final_core_mask, final_inflam_mask, region_full, h, w):
     region_area = np.count_nonzero(~np.isnan(region_full))
     if region_area == 0:
         return final_core_mask, final_inflam_mask
     inflam_area = int(np.count_nonzero(final_inflam_mask))
-    core_area   = int(np.count_nonzero(final_core_mask))
+    core_area = int(np.count_nonzero(final_core_mask))
     inflam_frac = inflam_area / region_area
-    core_frac   = core_area / region_area
+    core_frac = core_area / region_area
 
     scale_needed = 1.0
     if inflam_frac > MAX_INFLAM_REGION_COVERAGE:
@@ -411,9 +419,10 @@ def enforce_region_coverage_cap(final_core_mask, final_inflam_mask, region_full,
 
     if scale_needed < 1.0:
         final_inflam_mask = scale_mask(final_inflam_mask, scale_needed, h, w)
-        final_core_mask   = scale_mask(final_core_mask,   scale_needed, h, w)
+        final_core_mask = scale_mask(final_core_mask, scale_needed, h, w)
 
     return final_core_mask, final_inflam_mask
+
 
 # ==========================
 # Synthetic day iterator
@@ -425,33 +434,38 @@ def compute_timeline(mode, dev_days, static_days):
         return static_days, ("static",)
     return dev_days + static_days, ("developing", "static")
 
+
 # ==========================
 # Per-variant runner
 # ==========================
-def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode, dev_days, static_days, out_root, seed=None):
-    rng_ = rng(seed)
-    params = sample_variant_params(rng_)
+def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode, dev_days, static_days, out_root,
+                            seed=None):
+    # Optional per-variant seeding (affects global np.random for reproducibility)
+    if seed is not None:
+        np.random.seed(int(seed))
+
+    params = sample_variant_params()
     params.update(base_params)
     params["generation_mode"] = mode
 
     mat = scipy.io.loadmat(mat_path)
-    left_crop  = mat["Indirect_plantar_Right_crop"]   # project convention
+    left_crop = mat["Indirect_plantar_Right_crop"]  # project convention
     right_crop = mat["Indirect_plantar_Left_crop"]
     num_src_days = left_crop.shape[0]
 
     # ---- Reference corrected canvases + choose center/shape on Day 0 ----
-    ref_left, ref_right, info0 = correct_align_feet_for_day(left_crop[0,0], right_crop[0,0])
+    ref_left, ref_right, info0 = correct_align_feet_for_day(left_crop[0, 0], right_crop[0, 0])
     ref_h, ref_w = ref_left.shape
 
     target_img = ref_left if params["apply_to"] == "left" else ref_right
     (y_center, x_center, shape_mode, _, _, region_full, region_key
      ) = select_center_and_shape_on_image(
         target_img, params["apply_wound_to"], params["position_mode"],
-        params["manual_coord"], params["shape_mode"], rng_
+        params["manual_coord"], params["shape_mode"]
     )
 
     # ---- Radii (relative) & coverage caps ----
-    core_r, inflam_r = pick_final_radii(ref_h, ref_w, region_full, rng_, params)
+    core_r, inflam_r = pick_final_radii(ref_h, ref_w, region_full, params)
     final_core_mask, final_inflam_mask, blob_count = build_final_mask(
         shape_mode, x_center, y_center,
         core_r, inflam_r,
@@ -525,9 +539,9 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
     for i in range(total_days):
         src_day = i % num_src_days
 
-        left_can, right_can, info_day = correct_align_feet_for_day(left_crop[src_day,0], right_crop[src_day,0])
+        left_can, right_can, info_day = correct_align_feet_for_day(left_crop[src_day, 0], right_crop[src_day, 0])
         if left_can.shape != (ref_h, ref_w):
-            left_can  = center_pad_to(left_can,  ref_h, ref_w)
+            left_can = center_pad_to(left_can, ref_h, ref_w)
             right_can = center_pad_to(right_can, ref_h, ref_w)
 
         if mode == "both":
@@ -543,21 +557,21 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         core_mask, inflam_mask = masks_for_progress(progress, final_core_mask, final_inflam_mask, params, ref_h, ref_w)
 
         if params["apply_to"] == "left":
-            wounded_canvas = np.array(left_can,  copy=True)
-            normal_canvas  = right_can
+            wounded_canvas = np.array(left_can, copy=True)
+            normal_canvas = right_can
         else:
             wounded_canvas = np.array(right_can, copy=True)
-            normal_canvas  = left_can
+            normal_canvas = left_can
 
         core_base = masked_nonzero_mean(normal_canvas, core_mask)
         inflam_base = masked_nonzero_mean(normal_canvas, inflam_mask)
 
         increment = FINAL_INCREMENT_DEG_C * (progress if current_phase == "developing" else 1.0)
-        core_target   = core_base   + increment
+        core_target = core_base + increment
         inflam_target = inflam_base + increment
 
         wounded_canvas = soft_blend_set(wounded_canvas, inflam_target, inflam_mask, sigma=params["blur_sigma_inflam"])
-        wounded_canvas = soft_blend_set(wounded_canvas, core_target,   core_mask,   sigma=params["blur_sigma_core"])
+        wounded_canvas = soft_blend_set(wounded_canvas, core_target, core_mask, sigma=params["blur_sigma_core"])
 
         if params["apply_to"] == "left":
             left_wounded, right_wounded = wounded_canvas, right_can
@@ -566,7 +580,7 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
 
         # PNG debug (flip right back only for display)
         right_display = mirror_horiz(right_wounded)
-        left_display  = left_wounded
+        left_display = left_wounded
         gap = np.full((ref_h, GAP_COLS), np.nan)
         combined = np.hstack((left_display, gap, right_display))
 
@@ -574,7 +588,7 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         im = ax.imshow(combined, cmap=CMAP)
         ax.axis("off")
         title = (
-            f"{patient_id} • Var {variant_idx:02d} • Day {i+1:02d} (src {src_day+1:02d}) — {current_phase}\n"
+            f"{patient_id} • Var {variant_idx:02d} • Day {i + 1:02d} (src {src_day + 1:02d}) — {current_phase}\n"
             f"{params['apply_to']} / {region_key} | "
             f"core_base={core_base:.2f}°C→{core_target:.2f}°C, "
             f"inflam_base={inflam_base:.2f}°C→{inflam_target:.2f}°C, "
@@ -644,6 +658,7 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
             )
         except Exception:
             pass
+
 
 # ==========================
 # Entry
