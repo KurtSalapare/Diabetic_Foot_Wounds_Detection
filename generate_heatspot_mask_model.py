@@ -129,8 +129,8 @@ def sample_variant_params(rng_):
         "inflam_radius_final": int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE)),
         "blur_sigma_core": float(rng_.uniform(5.0, 7.0)),
         "blur_sigma_inflam": float(rng_.uniform(5.0, 7.0)),
-        "multi_min_blobs": 2,
-        "multi_max_blobs": 6,
+        "multi_min_blobs": 10,
+        "multi_max_blobs": 50,
         "develop_mode": DEVELOP_MODE,
         "initial_size_scale": INITIAL_SIZE_SCALE,
         "initial_temp_scale": INITIAL_TEMP_SCALE,
@@ -209,72 +209,80 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
         final_core_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= core_radius_final ** 2
         final_inflam_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= inflam_radius_final ** 2
         n_blobs = 1
-
-    # multi-blob union
-    # n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
+        
     else:
         # Configuration for the constraint
-        # n_blobs = np.random.randint((multi_min_blobs, multi_max_blobs + 1))
-        n_blobs = 15
-        MIN_UNIQUE_PIXELS = 10
+        n_blobs = np.random.randint((multi_min_blobs, multi_max_blobs + 1))
+        MAX_OVERLAP_PIXELS = 5 # Maximum number of pixels that can overlap existing blobs
+        MIN_OVERLAP_PIXELS = 2  # NEW: Minimum number of pixels required to overlap (ensuring connection)
         MAX_ATTEMPTS = 500  # Increased attempts for better chance of finding a spot
-
+        
         # Lists to store parameters of successfully placed blobs
         centers = []
         core_r_list = []
         inflam_r_list = []
-
+        
         # List of individual core masks (used to calculate cumulative mask)
         individual_core_masks = []
-
+        
         # --- 1. Place the first blob (Unconstrained) ---
         initial_core_mask = make_circle_mask(x_center, y_center, core_radius_final, X, Y)
-
+        
         individual_core_masks.append(initial_core_mask)
         centers.append((x_center, y_center))
         core_r_list.append(core_radius_final)
         inflam_r_list.append(inflam_radius_final)
 
         # --- 2. Iterative Placement with Constraint Check ---
-
+        
         for i in range(n_blobs - 1):
-
+            
             # The cumulative mask is the union of all successfully placed core blobs so far
             cumulative_core_mask = np.logical_or.reduce(individual_core_masks)
 
             blob_placed = False
             for attempt in range(MAX_ATTEMPTS):
-
+                
                 # a. Generate new blob parameters (Position and Radius)
                 # Base the new center on a randomly chosen existing center (clustering)
                 base_x, base_y = random.choice(centers)
-
+                
                 angle = np.random.uniform(0, 2 * np.pi)
-
+                
                 # Determine distance relative to the core radius
                 min_dist = max(2, core_radius_final // 2)
                 max_dist = max(3, core_radius_final * 2)
-                dist = np.random.randint(min_dist, max_dist)
-
+                dist  = np.random.randint(min_dist, max_dist)
+                
                 dx, dy = int(np.cos(angle) * dist), int(np.sin(angle) * dist)
-
+                
                 # New center, clipped to stay within image boundaries
                 new_x = np.clip(base_x + dx, 0, w - 1)
                 new_y = np.clip(base_y + dy, 0, h - 1)
-
+                
                 # New radii (randomly generated)
                 new_rc = np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final))
                 new_ri = np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final))
-
+                
                 # b. Create the mask for the potential new blob
                 new_core_mask = make_circle_mask(new_x, new_y, new_rc, X, Y)
 
-                # c. Find the unique area: (New Mask) AND (NOT Cumulative Mask)
+                # c. Find the overlap count
+                
+                # Pixels in the new blob that DO NOT overlap existing blobs
                 unique_pixels_mask = new_core_mask & (~cumulative_core_mask)
                 unique_count = np.sum(unique_pixels_mask)
-
-                # d. Check the constraint (unique pixels >= 5)
-                if unique_count >= MIN_UNIQUE_PIXELS:
+                
+                # Total pixels in the new blob
+                total_new_pixels = np.sum(new_core_mask) 
+                
+                # Overlap is the total pixels MINUS the unique pixels (pixels shared with the cumulative mask)
+                overlap_count = total_new_pixels - unique_count
+                
+                # d. Check the constraint: (overlap pixels >= MIN) AND (overlap pixels <= MAX)
+                # This ensures the blobs are connected but not heavily obscured.
+                if (overlap_count >= MIN_OVERLAP_PIXELS) and (overlap_count <= MAX_OVERLAP_PIXELS):
+                    
                     # Constraint met: Add this validated blob and move to the next iteration
                     individual_core_masks.append(new_core_mask)
                     centers.append((new_x, new_y))
@@ -282,24 +290,35 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
                     inflam_r_list.append(new_ri)
                     blob_placed = True
                     break
-
+            
             if not blob_placed:
                 print(
-                    f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Constraint may be too strict.")
+                    f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Overlap constraints ({MIN_OVERLAP_PIXELS}-{MAX_OVERLAP_PIXELS}) may be too strict.")
 
         # --- 3. Final Merging ---
-
+        
         # The core mask is the union of all validated individual masks
         final_core_mask = np.logical_or.reduce(individual_core_masks)
-
-        # The inflammation mask is created using all validated centers/radii
+        
+        # The inflammation mask is created using all validated centers/radii 
         # (It does NOT need the overlap check, it just uses the final parameters)
         final_inflam_mask = np.zeros((h, w), dtype=bool)
         for (cx, cy), ri in zip(centers, inflam_r_list):
             final_inflam_mask |= make_circle_mask(cx, cy, ri, X, Y)
-
+        
         n_blobs = len(centers)
+        
+    # # --- Plotting FOR Debugging ---
+    # fig, ax = plt.subplots(figsize=(8, 6))
+    # im = ax.imshow(final_core_mask, cmap="hot")
+    # ax.axis("off")
+    # ax.set_title(f"Day - Wound on ")
 
+    # cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.04)
+    # cbar.set_label("Temperature (°C)")
+
+    # plt.show()
+    
     return final_core_mask, final_inflam_mask, n_blobs
 
 
