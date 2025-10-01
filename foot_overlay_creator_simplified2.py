@@ -11,22 +11,29 @@ AVAILABLE_MAT_FILES = {
     "gz2": "Data/Temp Data/gz2.mat",
     "gz3": "Data/Temp Data/gz3.mat",
     "gz4": "Data/Temp Data/gz4.mat",
+    "gz5": "Data/Temp Data/gz5.mat",
+    "gz6": "Data/Temp Data/gz6.mat",
     "gz7": "Data/Temp Data/gz7.mat",
     "gz8": "Data/Temp Data/gz8.mat",
     "gz9": "Data/Temp Data/gz9.mat",
+    "gz10": "Data/Temp Data/gz10.mat",
+    "gz11": "Data/Temp Data/gz11.mat",
+    "gz12": "Data/Temp Data/gz12.mat",
     "pnt1": "Data/Temp Data/pnt_mat_files/pnt1.mat",
     "pnt2": "Data/Temp Data/pnt_mat_files/pnt2.mat",
     "pnt3": "Data/Temp Data/pnt_mat_files/pnt3.mat",
 }
-SELECTED_FILE = "gz3"
+SELECTED_FILE = "gz7"
 MAT_FILE = AVAILABLE_MAT_FILES[SELECTED_FILE]
 OUTPUT_DIR = "output_overlay_system"
+CROP_TYPE = "Dorsal"  # "Indirect_plantar" or "Dorsal"
+
 CMAP = "hot"
 RIGHT_ALPHA = 0.45
 ENABLE_ROTATION_OPTIMIZATION = True
 ROTATION_ANGLE_RANGE = (-30, 30)
 ROTATION_ANGLE_STEP = 0.5
-ENABLE_FOCUSED_OVERLAY = False
+ENABLE_FOCUSED_OVERLAY = True
 MANUAL_INDEX_SELECTION = None
 ENABLE_WARP_OPTIMIZATION = True
 
@@ -140,7 +147,9 @@ def detect_and_extract_images(left_crop, right_crop):
 def create_foot_overlay():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     mat = scipy.io.loadmat(MAT_FILE)
-    scan_left, scan_right = detect_and_extract_images(mat["Indirect_plantar_Right_crop"], mat["Indirect_plantar_Left_crop"])
+    scan_left, scan_right = detect_and_extract_images(
+        mat[f"{CROP_TYPE}_Right_crop"], mat[f"{CROP_TYPE}_Left_crop"])
+    
     
     if scan_left is None or scan_right is None:
         print("Failed to extract valid images.")
