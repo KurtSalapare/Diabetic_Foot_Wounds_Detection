@@ -186,7 +186,7 @@ def select_center_and_shape(left_crop, right_crop):
         y_center = int(np.mean(ys)); x_center = int(np.mean(xs))
     elif position_mode == 2:
         idx = np.random.randint(len(ys))
-        y_center, x_center = int(ys[idx]), int(xs[idx])
+        y_center, x_center = ys[idx], xs[idx]
     elif position_mode == 3:
         y_center, x_center = manual_coord
     else:

@@ -215,7 +215,8 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
     # n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
     else:
         # Configuration for the constraint
-        n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
+        # n_blobs = np.random.randint((multi_min_blobs, multi_max_blobs + 1))
+        n_blobs = 15
         MIN_UNIQUE_PIXELS = 10
         MAX_ATTEMPTS = 500  # Increased attempts for better chance of finding a spot
 
