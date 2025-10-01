@@ -75,6 +75,7 @@ LOG_VARIANT_ASSIGNMENTS = True
 GENERATION_MODE = "both"  # "static", "developing", "both"
 DEV_DAYS = 20
 STATIC_DAYS = 10
+PRE_WOUND_DAYS = 10
 
 DEVELOP_MODE = "size+intensity"  # "size+intensity" | "intensity-only"
 INITIAL_SIZE_SCALE = 0.05
@@ -588,12 +589,17 @@ def enforce_region_coverage_cap(final_core_mask, final_inflam_mask, region_full,
 # ==========================
 # Synthetic day iterator
 # ==========================
-def compute_timeline(mode, dev_days, static_days):
+def compute_timeline(mode, pre_days, dev_days, static_days):
+    """
+    Returns: total_days, tuple_of_phases
+    Phases are always in generated order.
+    """
     if mode == "developing":
-        return dev_days, ("developing",)
+        return pre_days + dev_days, ("healthy", "developing")
     if mode == "static":
-        return static_days, ("static",)
-    return dev_days + static_days, ("developing", "static")
+        return pre_days + static_days, ("healthy", "static")
+    # "both" -> healthy -> developing -> static
+    return pre_days + dev_days + static_days, ("healthy", "developing", "static")
 
 
 # ==========================
@@ -649,10 +655,10 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         )
 
     # Output dirs
-    total_days, phases = compute_timeline(mode, dev_days, static_days)
+    total_days, phases = compute_timeline(mode, PRE_WOUND_DAYS, dev_days, static_days)
     subdir_root = os.path.join(
         out_root, f"{patient_id}", f"variant_{variant_idx:02d}",
-        f"{mode}_dev{dev_days}_stat{static_days}"
+        f"{mode}_pre{PRE_WOUND_DAYS}_dev{dev_days}_stat{static_days}"
     )
     subdir_png = os.path.join(subdir_root, "png")
     subdir_mat = os.path.join(subdir_root, "mat")
@@ -723,39 +729,73 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
             left_crop[src_day, 0], right_crop[src_day, 0], tf
         )
 
+        # Map global day index -> phase + progress within phase
         if mode == "both":
-            current_phase = "developing" if i < dev_days else "static"
-            progress = ((i + 1) / dev_days) if i < dev_days and dev_days > 0 else 1.0
+            if i < PRE_WOUND_DAYS:
+                current_phase = "healthy"
+                progress = 0.0
+            elif i < PRE_WOUND_DAYS + dev_days:
+                current_phase = "developing"
+                progress = ((i - PRE_WOUND_DAYS + 1) / dev_days) if dev_days > 0 else 1.0
+            else:
+                current_phase = "static"
+                progress = 1.0
         elif mode == "developing":
-            current_phase = "developing"
-            progress = ((i + 1) / dev_days) if dev_days > 0 else 1.0
+            if i < PRE_WOUND_DAYS:
+                current_phase = "healthy"
+                progress = 0.0
+            else:
+                current_phase = "developing"
+                progress = ((i - PRE_WOUND_DAYS + 1) / dev_days) if dev_days > 0 else 1.0
+        else:  # "static"
+            if i < PRE_WOUND_DAYS:
+                current_phase = "healthy"
+                progress = 0.0
+            else:
+                current_phase = "static"
+                progress = 1.0
+
+        # ---- Build masks (or none) & apply wound only when needed ----
+        if current_phase == "healthy":
+            # no wound at all; keep canvases as-is
+            core_mask = np.zeros((ref_h, ref_w), dtype=bool)
+            inflam_mask = np.zeros((ref_h, ref_w), dtype=bool)
+            increment = 0.0
+            core_base = 0.0
+            inflam_base = 0.0
+            core_target = 0.0
+            inflam_target = 0.0
+            left_wounded, right_wounded = left_can, right_can
         else:
-            current_phase = "static"
-            progress = 1.0
+            core_mask, inflam_mask = masks_for_progress(
+                progress, final_core_mask, final_inflam_mask, params, ref_h, ref_w
+            )
 
-        core_mask, inflam_mask = masks_for_progress(progress, final_core_mask, final_inflam_mask, params, ref_h, ref_w)
+            # choose which side gets the overlay (unchanged)
+            if params["apply_to"] == "left":
+                wounded_canvas = np.array(left_can, copy=True)
+                normal_canvas = right_can
+            else:
+                wounded_canvas = np.array(right_can, copy=True)
+                normal_canvas = left_can
 
-        if params["apply_to"] == "left":
-            wounded_canvas = np.array(left_can, copy=True)
-            normal_canvas = right_can
-        else:
-            wounded_canvas = np.array(right_can, copy=True)
-            normal_canvas = left_can
+            # contralateral-referenced base temps (unchanged)
+            core_base = masked_nonzero_mean(normal_canvas, core_mask)
+            inflam_base = masked_nonzero_mean(normal_canvas, inflam_mask)
 
-        core_base = masked_nonzero_mean(normal_canvas, core_mask)
-        inflam_base = masked_nonzero_mean(normal_canvas, inflam_mask)
+            increment = FINAL_INCREMENT_DEG_C * (progress if current_phase == "developing" else 1.0)
+            core_target = core_base + increment
+            inflam_target = inflam_base + increment
 
-        increment = FINAL_INCREMENT_DEG_C * (progress if current_phase == "developing" else 1.0)
-        core_target = core_base + increment
-        inflam_target = inflam_base + increment
+            # soft-blend wound (unchanged)
+            wounded_canvas = soft_blend_set(wounded_canvas, inflam_target, inflam_mask,
+                                            sigma=params["blur_sigma_inflam"])
+            wounded_canvas = soft_blend_set(wounded_canvas, core_target, core_mask, sigma=params["blur_sigma_core"])
 
-        wounded_canvas = soft_blend_set(wounded_canvas, inflam_target, inflam_mask, sigma=params["blur_sigma_inflam"])
-        wounded_canvas = soft_blend_set(wounded_canvas, core_target, core_mask, sigma=params["blur_sigma_core"])
-
-        if params["apply_to"] == "left":
-            left_wounded, right_wounded = wounded_canvas, right_can
-        else:
-            left_wounded, right_wounded = left_can, wounded_canvas
+            if params["apply_to"] == "left":
+                left_wounded, right_wounded = wounded_canvas, right_can
+            else:
+                left_wounded, right_wounded = left_can, wounded_canvas
 
         # PNG debug (flip right back only for display)
         right_display = mirror_horiz(right_wounded)
