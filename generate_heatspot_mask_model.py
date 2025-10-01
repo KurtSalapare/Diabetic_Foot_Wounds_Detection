@@ -126,10 +126,10 @@ def sample_variant_params(rng_):
         "manual_coord": (150, 180),
         "shape_mode": rng_.choice(["circle", "multi"]),
         # Legacy placeholders; used only if SIZE_POLICY="absolute"
-        "core_radius_final": int(rng_.integers(*ABS_CORE_RADIUS_RANGE)),
-        "inflam_radius_final": int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE)),
-        "blur_sigma_core": float(rng_.uniform(5.0, 7.0)),
-        "blur_sigma_inflam": float(rng_.uniform(5.0, 7.0)),
+        "core_radius_final": np.random.randint(*ABS_CORE_RADIUS_RANGE),
+        "inflam_radius_final": np.random.randint(*ABS_INFLAM_RADIUS_RANGE),
+        "blur_sigma_core": np.random.uniform(5.0, 7.0),
+        "blur_sigma_inflam": np.random.uniform(5.0, 7.0),
         "multi_min_blobs": 10,
         "multi_max_blobs": 50,
         "develop_mode": DEVELOP_MODE,
@@ -213,7 +213,7 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
         
     else:
         # Configuration for the constraint
-        n_blobs = np.random.randint((multi_min_blobs, multi_max_blobs + 1))
+        n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
         MAX_OVERLAP_PIXELS = 5 # Maximum number of pixels that can overlap existing blobs
         MIN_OVERLAP_PIXELS = 2  # NEW: Minimum number of pixels required to overlap (ensuring connection)
         MAX_ATTEMPTS = 500  # Increased attempts for better chance of finding a spot
@@ -344,9 +344,14 @@ def scale_mask(mask, scale_factor, h, w):
 
 def masks_for_progress(progress, final_core_mask, final_inflam_mask, params, h, w):
     if params["develop_mode"] == "size+intensity":
-        scale_factor = params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress
-        core_mask = scale_mask(final_core_mask, scale_factor, h, w)
-        inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
+        if progress < 1:
+            scale_factor = 1 + (params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress)
+            core_mask = scale_mask(final_core_mask, scale_factor, h, w)
+            inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
+        else :
+            scale_factor = 1
+            core_mask = scale_mask(final_core_mask, scale_factor, h, w)
+            inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
     elif params["develop_mode"] == "intensity-only":
         core_mask = final_core_mask
         inflam_mask = final_inflam_mask
