@@ -890,31 +890,32 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         plt.close()
 
         # MAT save
-        try:
-            scipy.io.savemat(
-                os.path.join(
-                    subdir_mat,
-                    f"{patient_id}_v{variant_idx:02d}_d{i + 1:02d}_{current_phase}.mat"
-                ),
-                {
-                    "left_canvas": left_can,
-                    "right_canvas": right_can,
-                    "left_wounded": left_wounded,
-                    "right_wounded": right_wounded,
-                    "core_mask": core_mask,
-                    "inflam_mask": inflam_mask,
-                    "core_base": float(core_base),
-                    "inflam_base": float(inflam_base),
-                    "increment": float(increment),
-                    "core_target": float(core_target),
-                    "inflam_target": float(inflam_target),
-                    "phase": current_phase,
-                    "progress": float(progress),
-                    "foot_correction_info": info_day
-                }
-            )
-        except Exception:
-            pass
+        
+        scipy.io.savemat(
+            os.path.join(
+                subdir_mat,
+                f"{patient_id}_v{variant_idx:02d}_d{i + 1:02d}_{current_phase}.mat"
+            ),
+            {
+                "left_plantar": left_display,
+                "right_plantar": right_display,
+                "combined": combined
+                # "left_canvas": left_can,
+                # "right_canvas": right_can,
+                # "left_wounded": left_wounded,
+                # "right_wounded": right_wounded,
+                # "core_mask": core_mask,
+                # "inflam_mask": inflam_mask,
+                # "core_base": float(core_base),
+                # "inflam_base": float(inflam_base),
+                # "increment": float(increment),
+                # "core_target": float(core_target),
+                # "inflam_target": float(inflam_target),
+                # "phase": current_phase,
+                # "progress": float(progress),
+                # "foot_correction_info": info_day
+            }
+        )
 
 
 # ==========================

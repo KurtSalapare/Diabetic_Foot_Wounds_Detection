@@ -10,7 +10,8 @@ from scipy.io.matlab.miobase import MatReadWarning
 # CONFIGURATION SECTION
 # ==========================
 
-mat_file = "Data/Temp Data/gz14.mat"  # input .mat (INDIRECT crops)
+# Might need to change depending on the directory
+mat_file_dir = "C:/Users/Kurt Salapare/Desktop/TCS_1/Design Project/diabetic_foot_wounds_detection_git/Diabetic_Foot_Wounds_Detection/output_images_wound_modes_segmented/gz7/variant_01/both_pre10_dev27_stat10/mat/"  # input .mat (INDIRECT crops)
 output_dir = "output_wound_detection" # output folder
 
 # Process which days (None = all)
@@ -36,11 +37,6 @@ colormap = "hot"
 # ==========================
 
 warnings.filterwarnings("ignore", category=MatReadWarning)
-
-# Load .mat with INDIRECT crops (as requested)
-mat = scipy.io.loadmat(mat_file)
-left_crop  = mat["Indirect_plantar_Right_crop"]  # per instruction
-right_crop = mat["Indirect_plantar_Left_crop"]   # per instruction
 
 # ---------- Helpers ----------
 
@@ -173,133 +169,181 @@ def build_index_to_rect(indices, boxes):
         d[(ix0, iy0)] = (x0, y0, w0, h0)
     return d
 
+def count_files_os_module(directory_path):
+    """
+    Counts files in a directory using the traditional os.listdir() method.
+    It filters out directories and only counts regular files.
+    """
+    print(f"--- Using os Module to Count Files in: '{directory_path}' ---")
+    
+    try:
+        # 1. Get a list of all items (files and directories)
+        all_items = os.listdir(directory_path)
+        
+        # 2. Filter the list to include ONLY files (not directories or links)
+        file_count = 0
+        for item_name in all_items:
+            full_path = os.path.join(directory_path, item_name)
+            if os.path.isfile(full_path):
+                file_count += 1
+        
+        return file_count
+    
+    except FileNotFoundError:
+        print(f"Error: Directory not found at '{directory_path}'")
+        return 0
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return 0
+
 # ---------- Main per-day loop ----------
 
 os.makedirs(output_dir, exist_ok=True)
 
-num_days = left_crop.shape[0]
-day_indices = range(num_days) if days_to_process is None else days_to_process
+# num_days = count_files_os_module(mat_file_dir)
+# day_indices = range(num_days) if days_to_process is None else days_to_process
 
-for i in day_indices:
-    # raw scans
-    scan_left_raw  = left_crop[i, 0]
-    scan_right_raw = right_crop[i, 0]
+day_count = 0
 
-    # display images
-    img_left  = make_display_image(scan_left_raw)
-    img_right = make_display_image(scan_right_raw)
+try: 
+    for item in os.listdir(mat_file_dir):
+        
+        full_path = os.path.join(mat_file_dir, item)
+            
+        # 3. Check if the item is a regular file
+        if os.path.isfile(full_path):
+            # Load .mat with INDIRECT crops (as requested)
+            mat = scipy.io.loadmat(full_path)
+            left_crop  = mat["left_plantar"]  # per instruction
+            right_crop = mat["right_plantar"]   # per instruction
+            combined = mat["combined"]
 
-    # trim columns independently
-    img_left_trim,  valid_cols_left  = trim_empty_columns(img_left)
-    img_right_trim, valid_cols_right = trim_empty_columns(img_right)
+            # raw scans
+            scan_left_raw  = left_crop
+            scan_right_raw = right_crop
 
-    # build grids (valid chunks only) per foot, in TRIMMED coords
-    boxes_left,  idx_left  = compute_valid_grid_boxes(scan_left_raw,  img_left_trim,  valid_cols_left,  chunk_px)
-    boxes_right, idx_right = compute_valid_grid_boxes(scan_right_raw, img_right_trim, valid_cols_right, chunk_px)
+            # display images
+            img_left  = make_display_image(scan_left_raw)
+            img_right = make_display_image(scan_right_raw)
 
-    # find center chunk per foot (reference) and extents
-    (center_idx_left,  center_xy_left)  = foot_center_chunk(img_left_trim,  boxes_left,  idx_left,  chunk_px)
-    (center_idx_right, center_xy_right) = foot_center_chunk(img_right_trim, boxes_right, idx_right, chunk_px)
-    ext_left  = compute_extents(idx_left,  center_idx_left)
-    ext_right = compute_extents(idx_right, center_idx_right)
+            # trim columns independently
+            img_left_trim,  valid_cols_left  = trim_empty_columns(img_left)
+            img_right_trim, valid_cols_right = trim_empty_columns(img_right)
 
-    # fast lookups
-    left_dict  = build_index_to_rect(idx_left,  boxes_left)
-    right_dict = build_index_to_rect(idx_right, boxes_right)
+            # build grids (valid chunks only) per foot, in TRIMMED coords
+            boxes_left,  idx_left  = compute_valid_grid_boxes(scan_left_raw,  img_left_trim,  valid_cols_left,  chunk_px)
+            boxes_right, idx_right = compute_valid_grid_boxes(scan_right_raw, img_right_trim, valid_cols_right, chunk_px)
 
-    # map LEFT -> RIGHT to form mirrored pairs
-    pairs = []  # list of ((l_ix,l_iy), (r_ix,r_iy))
-    if center_idx_left is not None and center_idx_right is not None and len(idx_left) > 0 and len(idx_right) > 0:
-        right_set = set(idx_right)
-        for l_idx in idx_left:
-            mapped = map_chunk_across_feet(
-                l_idx, center_idx_left, center_idx_right,
-                ext_left, ext_right, mirror=True
-            )
-            if mapped is None:
-                continue
-            # snap to nearest valid if exact mapped idx is invalid
-            if mapped not in right_set:
-                mapped = nearest_valid_index(mapped[0], mapped[1], idx_right)
-                if mapped is None:
+            # find center chunk per foot (reference) and extents
+            (center_idx_left,  center_xy_left)  = foot_center_chunk(img_left_trim,  boxes_left,  idx_left,  chunk_px)
+            (center_idx_right, center_xy_right) = foot_center_chunk(img_right_trim, boxes_right, idx_right, chunk_px)
+            ext_left  = compute_extents(idx_left,  center_idx_left)
+            ext_right = compute_extents(idx_right, center_idx_right)
+
+            # fast lookups
+            left_dict  = build_index_to_rect(idx_left,  boxes_left)
+            right_dict = build_index_to_rect(idx_right, boxes_right)
+
+            # map LEFT -> RIGHT to form mirrored pairs
+            pairs = []  # list of ((l_ix,l_iy), (r_ix,r_iy))
+            if center_idx_left is not None and center_idx_right is not None and len(idx_left) > 0 and len(idx_right) > 0:
+                right_set = set(idx_right)
+                for l_idx in idx_left:
+                    mapped = map_chunk_across_feet(
+                        l_idx, center_idx_left, center_idx_right,
+                        ext_left, ext_right, mirror=True
+                    )
+                    if mapped is None:
+                        continue
+                    # snap to nearest valid if exact mapped idx is invalid
+                    if mapped not in right_set:
+                        mapped = nearest_valid_index(mapped[0], mapped[1], idx_right)
+                        if mapped is None:
+                            continue
+                    pairs.append((l_idx, mapped))
+
+            # --- compute suspicion per pair ---
+            suspicious_left  = set()
+            suspicious_right = set()
+
+            # Prepare trimmed RAW arrays for stats (not strictly needed since we already excluded zeros,
+            # but we use img_trim with NaNs to compute means safely).
+            for (l_idx, r_idx) in pairs:
+                # locate rectangles (x0,y0,w,h) in trimmed coords
+                if l_idx not in left_dict or r_idx not in right_dict:
                     continue
-            pairs.append((l_idx, mapped))
+                lx0, ly0, lw, lh = left_dict[l_idx]
+                rx0, ry0, rw, rh = right_dict[r_idx]
 
-    # --- compute suspicion per pair ---
-    suspicious_left  = set()
-    suspicious_right = set()
+                # extract chunk regions from trimmed display arrays (NaNs mark background)
+                l_region = img_left_trim[ly0:ly0+lh, lx0:lx0+lw]
+                r_region = img_right_trim[ry0:ry0+rh, rx0:rx0+rw]
 
-    # Prepare trimmed RAW arrays for stats (not strictly needed since we already excluded zeros,
-    # but we use img_trim with NaNs to compute means safely).
-    for (l_idx, r_idx) in pairs:
-        # locate rectangles (x0,y0,w,h) in trimmed coords
-        if l_idx not in left_dict or r_idx not in right_dict:
-            continue
-        lx0, ly0, lw, lh = left_dict[l_idx]
-        rx0, ry0, rw, rh = right_dict[r_idx]
+                # compute mean temperatures per chunk (ignore NaNs)
+                l_mean = np.nanmean(l_region) if l_region.size > 0 else np.nan
+                r_mean = np.nanmean(r_region) if r_region.size > 0 else np.nan
+                if np.isnan(l_mean) or np.isnan(r_mean):
+                    continue
 
-        # extract chunk regions from trimmed display arrays (NaNs mark background)
-        l_region = img_left_trim[ly0:ly0+lh, lx0:lx0+lw]
-        r_region = img_right_trim[ry0:ry0+rh, rx0:rx0+rw]
+                # suspicious if absolute mean difference >= threshold
+                if abs(l_mean - r_mean) >= temp_diff_threshold:
+                    suspicious_left.add(l_idx)
+                    suspicious_right.add(r_idx)
 
-        # compute mean temperatures per chunk (ignore NaNs)
-        l_mean = np.nanmean(l_region) if l_region.size > 0 else np.nan
-        r_mean = np.nanmean(r_region) if r_region.size > 0 else np.nan
-        if np.isnan(l_mean) or np.isnan(r_mean):
-            continue
+            # ------------- Combine feet and draw -------------
+            gap = np.full((img_left_trim.shape[0], gap_cols), np.nan)
+            combined = np.hstack((img_left_trim, gap, img_right_trim))
 
-        # suspicious if absolute mean difference >= threshold
-        if abs(l_mean - r_mean) >= temp_diff_threshold:
-            suspicious_left.add(l_idx)
-            suspicious_right.add(r_idx)
+            fig, ax = plt.subplots(figsize=figsize)
+            im = ax.imshow(combined, cmap=colormap)
+            ax.axis("off")
+            ax.set_title(f"Day {day_count+1}: Wound detection (Δ ≥ {temp_diff_threshold} °C) — {chunk_px}×{chunk_px} px")
 
-    # ------------- Combine feet and draw -------------
-    gap = np.full((img_left_trim.shape[0], gap_cols), np.nan)
-    combined = np.hstack((img_left_trim, gap, img_right_trim))
+            # draw black grid
+            left_w = img_left_trim.shape[1]
+            for (x, y, w_box, h_box) in boxes_left:
+                ax.add_patch(Rectangle((x, y), w_box, h_box, linewidth=0.7, edgecolor='black', facecolor='none'))
+            x_offset_right = left_w + gap_cols
+            for (x, y, w_box, h_box) in boxes_right:
+                ax.add_patch(Rectangle((x + x_offset_right, y), w_box, h_box, linewidth=0.7, edgecolor='black', facecolor='none'))
 
-    fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(combined, cmap=colormap)
-    ax.axis("off")
-    ax.set_title(f"Day {i+1}: Wound detection (Δ ≥ {temp_diff_threshold} °C) — {chunk_px}×{chunk_px} px")
+            # highlight center chunks BLUE
+            if center_xy_left is not None:
+                cx0, cy0 = center_xy_left
+                ax.add_patch(Rectangle((cx0, cy0), chunk_px, chunk_px,
+                                        linewidth=1.0, edgecolor='blue', facecolor='blue', alpha=0.35))
+            if center_xy_right is not None:
+                cx0, cy0 = center_xy_right
+                ax.add_patch(Rectangle((cx0 + x_offset_right, cy0), chunk_px, chunk_px,
+                                        linewidth=1.0, edgecolor='blue', facecolor='blue', alpha=0.35))
 
-    # draw black grid
-    left_w = img_left_trim.shape[1]
-    for (x, y, w_box, h_box) in boxes_left:
-        ax.add_patch(Rectangle((x, y), w_box, h_box, linewidth=0.7, edgecolor='black', facecolor='none'))
-    x_offset_right = left_w + gap_cols
-    for (x, y, w_box, h_box) in boxes_right:
-        ax.add_patch(Rectangle((x + x_offset_right, y), w_box, h_box, linewidth=0.7, edgecolor='black', facecolor='none'))
+            # highlight suspicious chunks GREEN (both feet)
+            for l_idx in suspicious_left:
+                if l_idx in left_dict:
+                    x0, y0, _, _ = left_dict[l_idx]
+                    ax.add_patch(Rectangle((x0, y0), chunk_px, chunk_px,
+                                            linewidth=1.2, edgecolor='green', facecolor='green', alpha=0.35))
+            for r_idx in suspicious_right:
+                if r_idx in right_dict:
+                    x0, y0, _, _ = right_dict[r_idx]
+                    ax.add_patch(Rectangle((x0 + x_offset_right, y0), chunk_px, chunk_px,
+                                            linewidth=1.2, edgecolor='green', facecolor='green', alpha=0.35))
 
-    # highlight center chunks BLUE
-    if center_xy_left is not None:
-        cx0, cy0 = center_xy_left
-        ax.add_patch(Rectangle((cx0, cy0), chunk_px, chunk_px,
-                               linewidth=1.0, edgecolor='blue', facecolor='blue', alpha=0.35))
-    if center_xy_right is not None:
-        cx0, cy0 = center_xy_right
-        ax.add_patch(Rectangle((cx0 + x_offset_right, cy0), chunk_px, chunk_px,
-                               linewidth=1.0, edgecolor='blue', facecolor='blue', alpha=0.35))
+            # colorbar
+            cbar = fig.colorbar(im, ax=ax, fraction=cbar_fraction, pad=cbar_pad)
+            cbar.set_label("Temperature (°C)")
 
-    # highlight suspicious chunks GREEN (both feet)
-    for l_idx in suspicious_left:
-        if l_idx in left_dict:
-            x0, y0, _, _ = left_dict[l_idx]
-            ax.add_patch(Rectangle((x0, y0), chunk_px, chunk_px,
-                                   linewidth=1.2, edgecolor='green', facecolor='green', alpha=0.35))
-    for r_idx in suspicious_right:
-        if r_idx in right_dict:
-            x0, y0, _, _ = right_dict[r_idx]
-            ax.add_patch(Rectangle((x0 + x_offset_right, y0), chunk_px, chunk_px,
-                                   linewidth=1.2, edgecolor='green', facecolor='green', alpha=0.35))
+            # save
+            os.makedirs(output_dir, exist_ok=True)
+            out_png = os.path.join(output_dir, f"wound_detect_day{day_count+1}.png")
+            plt.savefig(out_png, dpi=300, bbox_inches="tight")
+            plt.close()
+            
+        day_count+=1
 
-    # colorbar
-    cbar = fig.colorbar(im, ax=ax, fraction=cbar_fraction, pad=cbar_pad)
-    cbar.set_label("Temperature (°C)")
-
-    # save
-    os.makedirs(output_dir, exist_ok=True)
-    out_png = os.path.join(output_dir, f"wound_detect_day{i+1}.png")
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
-    plt.close()
-
-print(f"Saved wound-detection PNGs in '{output_dir}'")
+    print(f"Saved wound-detection PNGs in '{output_dir}'")
+    
+except FileNotFoundError:
+        print(f"Error: Directory not found at '{mat_file_dir}'")
+except Exception as e:
+    print(f"An error occurred: {e}")
