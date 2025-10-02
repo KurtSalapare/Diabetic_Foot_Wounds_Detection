@@ -72,9 +72,22 @@ LOG_VARIANT_ASSIGNMENTS = True
 # ==========================
 # GENERATION/GROWTH CONFIG
 # ==========================
+# HELPER FUNCTION FOR DAY GEN 
+def generate_weighted_random(x, y, z):
+    # Generate a random float between 0.0 and 1.0
+    probability_roll = random.random()
+    
+    # 60% chance (if probability_roll is between 0.0 and 0.6)
+    if probability_roll < 0.60:
+        return x
+    else:
+        # 40% chance (if probability_roll is between 0.6 and 1.0)
+        # Generate a uniform random integer between 10 and 30 (inclusive)
+        return random.randint(y, z)
+
 GENERATION_MODE = "both"  # "static", "developing", "both"
-DEV_DAYS = 20
-STATIC_DAYS = 10
+DEV_DAYS = generate_weighted_random(20, 10, 30)
+STATIC_DAYS = generate_weighted_random(10, 5, 10)
 PRE_WOUND_DAYS = 10
 
 DEVELOP_MODE = "size+intensity"  # "size+intensity" | "intensity-only"
