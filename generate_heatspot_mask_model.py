@@ -223,80 +223,71 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
         final_core_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= core_radius_final ** 2
         final_inflam_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= inflam_radius_final ** 2
         n_blobs = 1
-        
+
+    # multi-blob union
+    # n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
     else:
         # Configuration for the constraint
         n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
-        MAX_OVERLAP_PIXELS = 5 # Maximum number of pixels that can overlap existing blobs
-        MIN_OVERLAP_PIXELS = 2  # NEW: Minimum number of pixels required to overlap (ensuring connection)
+        MIN_UNIQUE_PIXELS = 10
         MAX_ATTEMPTS = 500  # Increased attempts for better chance of finding a spot
-        
+
         # Lists to store parameters of successfully placed blobs
         centers = []
         core_r_list = []
         inflam_r_list = []
-        
+
         # List of individual core masks (used to calculate cumulative mask)
         individual_core_masks = []
-        
+
         # --- 1. Place the first blob (Unconstrained) ---
         initial_core_mask = make_circle_mask(x_center, y_center, core_radius_final, X, Y)
-        
+
         individual_core_masks.append(initial_core_mask)
         centers.append((x_center, y_center))
         core_r_list.append(core_radius_final)
         inflam_r_list.append(inflam_radius_final)
 
         # --- 2. Iterative Placement with Constraint Check ---
-        
+
         for i in range(n_blobs - 1):
-            
+
             # The cumulative mask is the union of all successfully placed core blobs so far
             cumulative_core_mask = np.logical_or.reduce(individual_core_masks)
 
             blob_placed = False
             for attempt in range(MAX_ATTEMPTS):
-                
+
                 # a. Generate new blob parameters (Position and Radius)
                 # Base the new center on a randomly chosen existing center (clustering)
                 base_x, base_y = random.choice(centers)
-                
+
                 angle = np.random.uniform(0, 2 * np.pi)
-                
+
                 # Determine distance relative to the core radius
                 min_dist = max(2, core_radius_final // 2)
                 max_dist = max(3, core_radius_final * 2)
-                dist  = np.random.randint(min_dist, max_dist)
-                
+                dist = np.random.randint(min_dist, max_dist)
+
                 dx, dy = int(np.cos(angle) * dist), int(np.sin(angle) * dist)
-                
+
                 # New center, clipped to stay within image boundaries
                 new_x = np.clip(base_x + dx, 0, w - 1)
                 new_y = np.clip(base_y + dy, 0, h - 1)
-                
+
                 # New radii (randomly generated)
                 new_rc = np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final))
                 new_ri = np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final))
-                
+
                 # b. Create the mask for the potential new blob
                 new_core_mask = make_circle_mask(new_x, new_y, new_rc, X, Y)
 
-                # c. Find the overlap count
-                
-                # Pixels in the new blob that DO NOT overlap existing blobs
+                # c. Find the unique area: (New Mask) AND (NOT Cumulative Mask)
                 unique_pixels_mask = new_core_mask & (~cumulative_core_mask)
                 unique_count = np.sum(unique_pixels_mask)
-                
-                # Total pixels in the new blob
-                total_new_pixels = np.sum(new_core_mask) 
-                
-                # Overlap is the total pixels MINUS the unique pixels (pixels shared with the cumulative mask)
-                overlap_count = total_new_pixels - unique_count
-                
-                # d. Check the constraint: (overlap pixels >= MIN) AND (overlap pixels <= MAX)
-                # This ensures the blobs are connected but not heavily obscured.
-                if (overlap_count >= MIN_OVERLAP_PIXELS) and (overlap_count <= MAX_OVERLAP_PIXELS):
-                    
+
+                # d. Check the constraint (unique pixels >= 5)
+                if unique_count >= MIN_UNIQUE_PIXELS:
                     # Constraint met: Add this validated blob and move to the next iteration
                     individual_core_masks.append(new_core_mask)
                     centers.append((new_x, new_y))
@@ -304,36 +295,26 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
                     inflam_r_list.append(new_ri)
                     blob_placed = True
                     break
-            
+
             if not blob_placed:
                 print(
-                    f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Overlap constraints ({MIN_OVERLAP_PIXELS}-{MAX_OVERLAP_PIXELS}) may be too strict.")
+                    f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Constraint may be too strict.")
 
         # --- 3. Final Merging ---
-        
+
         # The core mask is the union of all validated individual masks
         final_core_mask = np.logical_or.reduce(individual_core_masks)
-        
-        # The inflammation mask is created using all validated centers/radii 
+
+        # The inflammation mask is created using all validated centers/radii
         # (It does NOT need the overlap check, it just uses the final parameters)
         final_inflam_mask = np.zeros((h, w), dtype=bool)
         for (cx, cy), ri in zip(centers, inflam_r_list):
             final_inflam_mask |= make_circle_mask(cx, cy, ri, X, Y)
-        
+
         n_blobs = len(centers)
-        
-    # # --- Plotting FOR Debugging ---
-    # fig, ax = plt.subplots(figsize=(8, 6))
-    # im = ax.imshow(final_core_mask, cmap="hot")
-    # ax.axis("off")
-    # ax.set_title(f"Day - Wound on ")
 
-    # cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.04)
-    # cbar.set_label("Temperature (°C)")
-
-    # plt.show()
-    
     return final_core_mask, final_inflam_mask, n_blobs
+
 
 
 def scale_mask(mask, scale_factor, h, w):
@@ -358,7 +339,7 @@ def scale_mask(mask, scale_factor, h, w):
 def masks_for_progress(progress, final_core_mask, final_inflam_mask, params, h, w):
     if params["develop_mode"] == "size+intensity":
         if progress < 1:
-            scale_factor = 1 + (params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress)
+            scale_factor = (params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress)
             core_mask = scale_mask(final_core_mask, scale_factor, h, w)
             inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
         else :
@@ -688,6 +669,7 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         extra = f", blobs={blob_count}" if shape_mode == "multi" else ""
         print(
             f"[patient={patient_id}] variant={variant_idx:02d} | "
+            f"Dev={dev_days}, stat={static_days} | "
             f"target_foot={params['apply_to']}, region={region_key}, "
             f"center=({y_center},{x_center}), shape={shape_mode}{extra}"
         )
@@ -930,15 +912,6 @@ if __name__ == "__main__":
     else:
         patient_ids = [SINGLE_PATIENT_ID]
 
-    if GENERATION_MODE == "both":
-        dev_days, static_days = int(DEV_DAYS), int(STATIC_DAYS)
-    elif GENERATION_MODE == "developing":
-        dev_days, static_days = int(DEV_DAYS), 0
-    elif GENERATION_MODE == "static":
-        dev_days, static_days = 0, int(STATIC_DAYS)
-    else:
-        raise ValueError("GENERATION_MODE must be 'static', 'developing', or 'both'")
-
     base_params = {
         "develop_mode": DEVELOP_MODE,
         "initial_size_scale": INITIAL_SIZE_SCALE,
@@ -948,6 +921,16 @@ if __name__ == "__main__":
     for pid in patient_ids:
         mat_path = os.path.join(MAT_ROOT, f"{pid}.mat")
         for v in range(1, WOUND_VARIANTS_PER_PATIENT + 1):
+            
+            if GENERATION_MODE == "both":
+                dev_days, static_days = generate_weighted_random(20, 10, 30), STATIC_DAYS
+            elif GENERATION_MODE == "developing":
+                dev_days, static_days = generate_weighted_random(20, 10, 30), 0
+            elif GENERATION_MODE == "static":
+                dev_days, static_days = 0, STATIC_DAYS
+            else:
+                raise ValueError("GENERATION_MODE must be 'static', 'developing', or 'both'")
+            
             seed = None if GLOBAL_SEED is None else GLOBAL_SEED + (hash(pid) % 10_000) + v
             run_variant_for_patient(
                 mat_path=mat_path,
