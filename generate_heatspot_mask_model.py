@@ -56,7 +56,7 @@ def _silence_imported(enabled=True):
 # HIGH-LEVEL DATASET CONFIG
 # ==========================
 RUN_ALL_PATIENTS = False
-SINGLE_PATIENT_ID = "gz7"
+SINGLE_PATIENT_ID = "gz15"
 PATIENT_PREFIX = "gz"
 PATIENT_COUNT = 15
 MAT_ROOT = "Data/Temp Data"
@@ -72,22 +72,9 @@ LOG_VARIANT_ASSIGNMENTS = True
 # ==========================
 # GENERATION/GROWTH CONFIG
 # ==========================
-# HELPER FUNCTION FOR DAY GEN 
-def generate_weighted_random(x, y, z):
-    # Generate a random float between 0.0 and 1.0
-    probability_roll = random.random()
-    
-    # 60% chance (if probability_roll is between 0.0 and 0.6)
-    if probability_roll < 0.60:
-        return x
-    else:
-        # 40% chance (if probability_roll is between 0.6 and 1.0)
-        # Generate a uniform random integer between 10 and 30 (inclusive)
-        return random.randint(y, z)
-
 GENERATION_MODE = "both"  # "static", "developing", "both"
-DEV_DAYS = generate_weighted_random(20, 10, 30)
-STATIC_DAYS = generate_weighted_random(10, 5, 10)
+DEV_DAYS = 20
+STATIC_DAYS = 10
 PRE_WOUND_DAYS = 10
 
 DEVELOP_MODE = "size+intensity"  # "size+intensity" | "intensity-only"
@@ -139,12 +126,12 @@ def sample_variant_params(rng_):
         "manual_coord": (150, 180),
         "shape_mode": rng_.choice(["circle", "multi"]),
         # Legacy placeholders; used only if SIZE_POLICY="absolute"
-        "core_radius_final": np.random.randint(*ABS_CORE_RADIUS_RANGE),
-        "inflam_radius_final": np.random.randint(*ABS_INFLAM_RADIUS_RANGE),
-        "blur_sigma_core": np.random.uniform(5.0, 7.0),
-        "blur_sigma_inflam": np.random.uniform(5.0, 7.0),
-        "multi_min_blobs": 10,
-        "multi_max_blobs": 50,
+        "core_radius_final": int(rng_.integers(*ABS_CORE_RADIUS_RANGE)),
+        "inflam_radius_final": int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE)),
+        "blur_sigma_core": float(rng_.uniform(5.0, 7.0)),
+        "blur_sigma_inflam": float(rng_.uniform(5.0, 7.0)),
+        "multi_min_blobs": 2,
+        "multi_max_blobs": 6,
         "develop_mode": DEVELOP_MODE,
         "initial_size_scale": INITIAL_SIZE_SCALE,
         "initial_temp_scale": INITIAL_TEMP_SCALE,
@@ -871,33 +858,31 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         plt.savefig(out_png, dpi=300, bbox_inches="tight")
         plt.close()
 
-        # MAT save
-        
-        scipy.io.savemat(
-            os.path.join(
+        # MAT save (one .mat per day with two cells: left & right)
+        # Project convention:
+        #   'Indirect_plantar_Right_crop'  -> LEFT foot (swapped naming)
+        #   'Indirect_plantar_Left_crop'   -> RIGHT foot
+        try:
+            # Store the *wounded* canvases for that day (healthy days = same as original canvases)
+            left_cell = np.empty((1, 1), dtype=object)
+            right_cell = np.empty((1, 1), dtype=object)
+            left_cell[0, 0] = left_wounded
+            right_cell[0, 0] = right_wounded
+
+            out_mat = os.path.join(
                 subdir_mat,
-                f"{patient_id}_v{variant_idx:02d}_d{i + 1:02d}_{current_phase}.mat"
-            ),
-            {
-                "left_plantar": left_display,
-                "right_plantar": right_display,
-                "combined": combined
-                # "left_canvas": left_can,
-                # "right_canvas": right_can,
-                # "left_wounded": left_wounded,
-                # "right_wounded": right_wounded,
-                # "core_mask": core_mask,
-                # "inflam_mask": inflam_mask,
-                # "core_base": float(core_base),
-                # "inflam_base": float(inflam_base),
-                # "increment": float(increment),
-                # "core_target": float(core_target),
-                # "inflam_target": float(inflam_target),
-                # "phase": current_phase,
-                # "progress": float(progress),
-                # "foot_correction_info": info_day
-            }
-        )
+                f"{patient_id}_v{variant_idx:02d}_day{i + 1:02d}.mat"
+            )
+
+            scipy.io.savemat(out_mat, {
+                "left_crop": left_cell,  # LEFT foot (by project convention)
+                "right_crop": right_cell,  # RIGHT foot
+                # Keep a tiny bit of context if useful later:
+                "phase": current_phase,
+                "progress": float(progress),
+            })
+        except Exception as e:
+            print(f"Warning: failed to save per-day mat for day {i + 1}: {e}")
 
 
 # ==========================
