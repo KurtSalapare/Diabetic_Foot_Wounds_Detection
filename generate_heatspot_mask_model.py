@@ -56,7 +56,7 @@ def _silence_imported(enabled=True):
 # HIGH-LEVEL DATASET CONFIG
 # ==========================
 RUN_ALL_PATIENTS = False
-SINGLE_PATIENT_ID = "gz7"
+SINGLE_PATIENT_ID = "gz15"
 PATIENT_PREFIX = "gz"
 PATIENT_COUNT = 15
 MAT_ROOT = "Data/Temp Data"
@@ -72,22 +72,9 @@ LOG_VARIANT_ASSIGNMENTS = True
 # ==========================
 # GENERATION/GROWTH CONFIG
 # ==========================
-# HELPER FUNCTION FOR DAY GEN 
-def generate_weighted_random(x, y, z):
-    # Generate a random float between 0.0 and 1.0
-    probability_roll = random.random()
-    
-    # 60% chance (if probability_roll is between 0.0 and 0.6)
-    if probability_roll < 0.60:
-        return x
-    else:
-        # 40% chance (if probability_roll is between 0.6 and 1.0)
-        # Generate a uniform random integer between 10 and 30 (inclusive)
-        return random.randint(y, z)
-
 GENERATION_MODE = "both"  # "static", "developing", "both"
-DEV_DAYS = generate_weighted_random(20, 10, 30)
-STATIC_DAYS = generate_weighted_random(10, 5, 10)
+DEV_DAYS = 20
+STATIC_DAYS = 10
 PRE_WOUND_DAYS = 10
 
 DEVELOP_MODE = "size+intensity"  # "size+intensity" | "intensity-only"
@@ -139,12 +126,12 @@ def sample_variant_params(rng_):
         "manual_coord": (150, 180),
         "shape_mode": rng_.choice(["circle", "multi"]),
         # Legacy placeholders; used only if SIZE_POLICY="absolute"
-        "core_radius_final": np.random.randint(*ABS_CORE_RADIUS_RANGE),
-        "inflam_radius_final": np.random.randint(*ABS_INFLAM_RADIUS_RANGE),
-        "blur_sigma_core": np.random.uniform(5.0, 7.0),
-        "blur_sigma_inflam": np.random.uniform(5.0, 7.0),
-        "multi_min_blobs": 10,
-        "multi_max_blobs": 50,
+        "core_radius_final": int(rng_.integers(*ABS_CORE_RADIUS_RANGE)),
+        "inflam_radius_final": int(rng_.integers(*ABS_INFLAM_RADIUS_RANGE)),
+        "blur_sigma_core": float(rng_.uniform(5.0, 7.0)),
+        "blur_sigma_inflam": float(rng_.uniform(5.0, 7.0)),
+        "multi_min_blobs": 2,
+        "multi_max_blobs": 6,
         "develop_mode": DEVELOP_MODE,
         "initial_size_scale": INITIAL_SIZE_SCALE,
         "initial_temp_scale": INITIAL_TEMP_SCALE,
@@ -223,80 +210,71 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
         final_core_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= core_radius_final ** 2
         final_inflam_mask = (X - x_center) ** 2 + (Y - y_center) ** 2 <= inflam_radius_final ** 2
         n_blobs = 1
-        
+
+    # multi-blob union
+    # n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
     else:
         # Configuration for the constraint
         n_blobs = np.random.randint(multi_min_blobs, multi_max_blobs + 1)
-        MAX_OVERLAP_PIXELS = 5 # Maximum number of pixels that can overlap existing blobs
-        MIN_OVERLAP_PIXELS = 2  # NEW: Minimum number of pixels required to overlap (ensuring connection)
+        MIN_UNIQUE_PIXELS = 10
         MAX_ATTEMPTS = 500  # Increased attempts for better chance of finding a spot
-        
+
         # Lists to store parameters of successfully placed blobs
         centers = []
         core_r_list = []
         inflam_r_list = []
-        
+
         # List of individual core masks (used to calculate cumulative mask)
         individual_core_masks = []
-        
+
         # --- 1. Place the first blob (Unconstrained) ---
         initial_core_mask = make_circle_mask(x_center, y_center, core_radius_final, X, Y)
-        
+
         individual_core_masks.append(initial_core_mask)
         centers.append((x_center, y_center))
         core_r_list.append(core_radius_final)
         inflam_r_list.append(inflam_radius_final)
 
         # --- 2. Iterative Placement with Constraint Check ---
-        
+
         for i in range(n_blobs - 1):
-            
+
             # The cumulative mask is the union of all successfully placed core blobs so far
             cumulative_core_mask = np.logical_or.reduce(individual_core_masks)
 
             blob_placed = False
             for attempt in range(MAX_ATTEMPTS):
-                
+
                 # a. Generate new blob parameters (Position and Radius)
                 # Base the new center on a randomly chosen existing center (clustering)
                 base_x, base_y = random.choice(centers)
-                
+
                 angle = np.random.uniform(0, 2 * np.pi)
-                
+
                 # Determine distance relative to the core radius
                 min_dist = max(2, core_radius_final // 2)
                 max_dist = max(3, core_radius_final * 2)
-                dist  = np.random.randint(min_dist, max_dist)
-                
+                dist = np.random.randint(min_dist, max_dist)
+
                 dx, dy = int(np.cos(angle) * dist), int(np.sin(angle) * dist)
-                
+
                 # New center, clipped to stay within image boundaries
                 new_x = np.clip(base_x + dx, 0, w - 1)
                 new_y = np.clip(base_y + dy, 0, h - 1)
-                
+
                 # New radii (randomly generated)
                 new_rc = np.random.randint(max(2, core_radius_final // 2), max(3, core_radius_final))
                 new_ri = np.random.randint(max(2, inflam_radius_final // 2), max(3, inflam_radius_final))
-                
+
                 # b. Create the mask for the potential new blob
                 new_core_mask = make_circle_mask(new_x, new_y, new_rc, X, Y)
 
-                # c. Find the overlap count
-                
-                # Pixels in the new blob that DO NOT overlap existing blobs
+                # c. Find the unique area: (New Mask) AND (NOT Cumulative Mask)
                 unique_pixels_mask = new_core_mask & (~cumulative_core_mask)
                 unique_count = np.sum(unique_pixels_mask)
-                
-                # Total pixels in the new blob
-                total_new_pixels = np.sum(new_core_mask) 
-                
-                # Overlap is the total pixels MINUS the unique pixels (pixels shared with the cumulative mask)
-                overlap_count = total_new_pixels - unique_count
-                
-                # d. Check the constraint: (overlap pixels >= MIN) AND (overlap pixels <= MAX)
-                # This ensures the blobs are connected but not heavily obscured.
-                if (overlap_count >= MIN_OVERLAP_PIXELS) and (overlap_count <= MAX_OVERLAP_PIXELS):
-                    
+
+                # d. Check the constraint (unique pixels >= 5)
+                if unique_count >= MIN_UNIQUE_PIXELS:
                     # Constraint met: Add this validated blob and move to the next iteration
                     individual_core_masks.append(new_core_mask)
                     centers.append((new_x, new_y))
@@ -304,35 +282,24 @@ def build_final_mask(shape_mode, x_center, y_center, core_radius_final, inflam_r
                     inflam_r_list.append(new_ri)
                     blob_placed = True
                     break
-            
+
             if not blob_placed:
                 print(
-                    f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Overlap constraints ({MIN_OVERLAP_PIXELS}-{MAX_OVERLAP_PIXELS}) may be too strict.")
+                    f"Warning: Failed to place blob {i + 2} after {MAX_ATTEMPTS} attempts. Constraint may be too strict.")
 
         # --- 3. Final Merging ---
-        
+
         # The core mask is the union of all validated individual masks
         final_core_mask = np.logical_or.reduce(individual_core_masks)
-        
-        # The inflammation mask is created using all validated centers/radii 
+
+        # The inflammation mask is created using all validated centers/radii
         # (It does NOT need the overlap check, it just uses the final parameters)
         final_inflam_mask = np.zeros((h, w), dtype=bool)
         for (cx, cy), ri in zip(centers, inflam_r_list):
             final_inflam_mask |= make_circle_mask(cx, cy, ri, X, Y)
-        
+
         n_blobs = len(centers)
-        
-    # # --- Plotting FOR Debugging ---
-    # fig, ax = plt.subplots(figsize=(8, 6))
-    # im = ax.imshow(final_core_mask, cmap="hot")
-    # ax.axis("off")
-    # ax.set_title(f"Day - Wound on ")
 
-    # cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.04)
-    # cbar.set_label("Temperature (°C)")
-
-    # plt.show()
-    
     return final_core_mask, final_inflam_mask, n_blobs
 
 
@@ -357,14 +324,9 @@ def scale_mask(mask, scale_factor, h, w):
 
 def masks_for_progress(progress, final_core_mask, final_inflam_mask, params, h, w):
     if params["develop_mode"] == "size+intensity":
-        if progress < 1:
-            scale_factor = 1 + (params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress)
-            core_mask = scale_mask(final_core_mask, scale_factor, h, w)
-            inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
-        else :
-            scale_factor = 1
-            core_mask = scale_mask(final_core_mask, scale_factor, h, w)
-            inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
+        scale_factor = params["initial_size_scale"] + (1.0 - params["initial_size_scale"]) * progress
+        core_mask = scale_mask(final_core_mask, scale_factor, h, w)
+        inflam_mask = scale_mask(final_inflam_mask, scale_factor, h, w)
     elif params["develop_mode"] == "intensity-only":
         core_mask = final_core_mask
         inflam_mask = final_inflam_mask
@@ -889,33 +851,31 @@ def run_variant_for_patient(mat_path, patient_id, variant_idx, base_params, mode
         plt.savefig(out_png, dpi=300, bbox_inches="tight")
         plt.close()
 
-        # MAT save
-        
-        scipy.io.savemat(
-            os.path.join(
+        # MAT save (one .mat per day with two cells: left & right)
+        # Project convention:
+        #   'Indirect_plantar_Right_crop'  -> LEFT foot (swapped naming)
+        #   'Indirect_plantar_Left_crop'   -> RIGHT foot
+        try:
+            # Store the *wounded* canvases for that day (healthy days = same as original canvases)
+            left_cell = np.empty((1, 1), dtype=object)
+            right_cell = np.empty((1, 1), dtype=object)
+            left_cell[0, 0] = left_wounded
+            right_cell[0, 0] = right_wounded
+
+            out_mat = os.path.join(
                 subdir_mat,
-                f"{patient_id}_v{variant_idx:02d}_d{i + 1:02d}_{current_phase}.mat"
-            ),
-            {
-                "left_plantar": left_display,
-                "right_plantar": right_display,
-                "combined": combined
-                # "left_canvas": left_can,
-                # "right_canvas": right_can,
-                # "left_wounded": left_wounded,
-                # "right_wounded": right_wounded,
-                # "core_mask": core_mask,
-                # "inflam_mask": inflam_mask,
-                # "core_base": float(core_base),
-                # "inflam_base": float(inflam_base),
-                # "increment": float(increment),
-                # "core_target": float(core_target),
-                # "inflam_target": float(inflam_target),
-                # "phase": current_phase,
-                # "progress": float(progress),
-                # "foot_correction_info": info_day
-            }
-        )
+                f"{patient_id}_v{variant_idx:02d}_day{i + 1:02d}.mat"
+            )
+
+            scipy.io.savemat(out_mat, {
+                "left_crop": left_cell,  # LEFT foot (by project convention)
+                "right_crop": right_cell,  # RIGHT foot
+                # Keep a tiny bit of context if useful later:
+                "phase": current_phase,
+                "progress": float(progress),
+            })
+        except Exception as e:
+            print(f"Warning: failed to save per-day mat for day {i + 1}: {e}")
 
 
 # ==========================
