@@ -142,6 +142,19 @@ def sample_variant_params(rng_):
 # ==========================
 # Helpers
 # ==========================
+
+def generate_weighted_random(x, y, z):
+    # Generate a random float between 0.0 and 1.0
+    probability_roll = random.random()
+    
+    # 60% chance (if probability_roll is between 0.0 and 0.6)
+    if probability_roll < 0.60:
+        return x
+    else:
+        # 40% chance (if probability_roll is between 0.6 and 1.0)
+        # Generate a uniform random integer between 10 and 30 (inclusive)
+        return random.randint(y, z)
+
 def to_display(img2d):
     return np.where(img2d == 0, np.nan, img2d)
 
